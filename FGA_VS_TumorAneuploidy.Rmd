@@ -1,0 +1,639 @@
+
+# load required package
+```{r}
+library(data.table)
+library(tidyverse)
+library(survminer)
+library(survival)
+library(ggridges)
+library(qvalue)
+library(readxl)
+library(verification)
+library(pROC)
+```
+
+# Set directories
+```{r}
+main_fig_dir <- "./Results/"
+```
+
+# load data (Samstein et al. cohort)
+```{r}
+sample_data = fread("./tmb_mskcc_2018/data_clinical_sample.txt") %>%
+  filter(CANCER_TYPE != "Skin Cancer, Non-Melanoma")
+patient_data = fread("./tmb_mskcc_2018/data_clinical_patient.txt")
+
+aneuploidy_scores = read.csv('Data.csv')
+
+mskcc_df = left_join(sample_data, patient_data) %>% 
+  left_join(aneuploidy_scores) %>%
+  filter(CANCER_TYPE != "Skin Cancer, Non-Melanoma") %>%
+  group_by(CANCER_TYPE) %>%
+  drop_na(TMB_NONSYNONYMOUS, aneuploidy_score) %>%
+  mutate(OS_STATUS = as.numeric(substr(OS_STATUS, 1, 1)),
+         OS_MONTHS = as.numeric(OS_MONTHS))
+
+fga_threshold = 0.2
+segs = fread("genie_data_cna_hg19.seg")
+segs2 = segs %>% filter(grepl("MSK", ID)) %>%
+  mutate(ID = gsub("GENIE-MSK-", "", ID)) %>%
+  filter(ID %in% mskcc_df$SAMPLE_ID)
+segs2 = segs2 %>% mutate(seg_length = loc.end - loc.start)
+fga = segs2 %>% group_by(ID) %>%
+  summarize(FGA = sum(seg_length[abs(seg.mean) >= fga_threshold]) / sum(seg_length))
+colnames(fga) = c("ID", 'fga')
+
+mskcc_df = left_join(mskcc_df, fga, by = c("SAMPLE_ID" = "ID"))
+
+mskcc_df = mskcc_df %>% group_by(CANCER_TYPE) %>% mutate(
+         aneuploidy_score_bin = ifelse(aneuploidy_score >= quantile(aneuploidy_score, 0.5), "high", "low"),
+         fga_bin = ifelse(fga >= quantile(fga, 0.5), "high", "low"),
+         tmb_bin = ifelse(TMB_NONSYNONYMOUS >= quantile(TMB_NONSYNONYMOUS, 0.8), "high", "low"),
+         tmb_bin_10 = ifelse(TMB_NONSYNONYMOUS >= 10, "high", "low"))
+
+mskcc_df = mskcc_df[c('CANCER_TYPE', 'TMB_NONSYNONYMOUS', 'OS_MONTHS', 'OS_STATUS', 'DRUG_TYPE', 'aneuploidy_score', 'fga', 'aneuploidy_score_bin', 'fga_bin', 'tmb_bin')]
+colnames(mskcc_df) = c('CancerType', 'TMB', 'OS_Months', 'OS_Event', 'Drug class', 'AS', 'FGA', 'AS_score', 'FGA_score', 'TMB_score')
+
+```
+
+# survival analysis for pan-cancer and individual cancer types (Samstein et al. cohort)
+```{r}
+stratify_var = 'FGA'
+data_plot = mskcc_df[mskcc_df$TMB_score=='low',]
+cancerType_list = unique(mskcc_df['CancerType'])$CancerType
+##### OS
+cancerData=data.frame(data_plot[paste0(stratify_var,'_score')],data_plot$OS_Months,data_plot$OS_Event)
+colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+sfit <- survfit(Surv(data_plot$OS_Months,data_plot$OS_Event) ~ Score, data=cancerData)
+scox <- coxph(Surv(data_plot$OS_Months,data_plot$OS_Event)~Score, data=cancerData)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(paste(c('OS', 'Samstein et al. cohort Pan-Cancer', round(P_value,5), round(HR_value,2)), collapse= " "))
+##### plot
+fontSize = 13
+survp=ggsurvplot(
+  sfit,
+  data = cancerData,
+  size = 1,                 # change line size
+  palette =
+    c("#E7B800", "#2E9FDF"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = FALSE,              # Add p-value
+  #pval.coord = c(70*0.65, 0.55),
+  xlim = c(0,80),
+  ylim=c(0,1),
+  xlab = "Time in months",
+  break.time.by = 10,
+  risk.table=TRUE,
+  risk.table.height = 0.29, # Useful to change when you have multiple groups
+  risk.table.pos="out",
+  risk.table.col="black",
+  risk.table.y.text = FALSE,
+  tables.y.text = FALSE, 
+  tables.theme = theme_cleantable(),
+  legend.labs =c("FGA high", "FGA low"),    # Change legend labels
+  legend.title="",
+  legend = c(0.6, 0.9), # legend relative position
+  font.main = c(fontSize),
+  font.caption = c(fontSize),
+  font.legend = c(fontSize),
+  font.tickslab = c(fontSize),
+  font.x = c(fontSize),
+  font.y = c(fontSize),
+  ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+  font.family = "Arial"
+)+ 
+  guides(colour = guide_legend(nrow = 1)) # legend in rows
+
+survp$plot <- survp$plot+ 
+              ggplot2::annotate("text", x=10, y=0.15, label=paste0('p',' = ',round(P_value,5), '\n', 'HR',' = ',round(HR_value,2)),size = 5)
+
+cn_now = paste0('TMBL_', stratify_var)
+title_str = paste0('Samstein_PanCancer_OS_',cn_now)
+png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+print(survp, newpage = FALSE)
+dev.off()
+
+for (ct in cancerType_list){
+  data_temp = data_plot[data_plot$CancerType==ct,]
+  cancerData=data.frame(data_temp[paste0(stratify_var,'_score')],data_temp$OS_Months,data_temp$OS_Event)
+  colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+  sfit <- survfit(Surv(data_temp$OS_Months,data_temp$OS_Event) ~ Score, data=cancerData)
+  scox <- coxph(Surv(data_temp$OS_Months,data_temp$OS_Event)~Score, data=cancerData)
+  scox_coef = summary(scox)$coefficients
+  HR_value = scox_coef[2] # hazard ratio
+  Z_value=scox_coef[4]
+  P_value=scox_coef[5]
+  print(paste(c('OS', 'Samstein et al. cohort ', ct, round(P_value,5), round(HR_value,2)), collapse= " "))
+  ##### plot
+  fontSize = 13
+  survp=ggsurvplot(
+    sfit,
+    data = cancerData,
+    size = 1,                 # change line size
+    palette =
+      c("#E7B800", "#2E9FDF"),# custom color palettes
+    conf.int = TRUE,          # Add confidence interval
+    pval = FALSE,              # Add p-value
+    #pval.coord = c(70*0.65, 0.55),
+    xlim = c(0,80),
+    ylim=c(0,1),
+    xlab = "Time in months",
+    break.time.by = 10,
+    risk.table=TRUE,
+    risk.table.height = 0.29, # Useful to change when you have multiple groups
+    risk.table.pos="out",
+    risk.table.col="black",
+    risk.table.y.text = FALSE,
+    tables.y.text = FALSE, 
+    tables.theme = theme_cleantable(),
+    legend.labs =c("High", "Low"),    # Change legend labels
+    legend.title="",
+    legend = c(2.65, 0.9), # legend relative position
+    font.main = c(fontSize),
+    font.caption = c(fontSize),
+    font.legend = c(fontSize),
+    font.tickslab = c(fontSize),
+    font.x = c(fontSize),
+    font.y = c(fontSize),
+    ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+    font.family = "Arial"
+  )+ 
+    guides(colour = guide_legend(nrow = 1)) # legend in rows
+  survp$plot <- survp$plot+ 
+              ggplot2::annotate("text", x=10, y=0.15, label=paste0('p',' = ',round(P_value,3), '\n', 'HR',' = ',round(HR_value,2)),size = 5)
+  title_str = paste0('Samstein_',ct,'_OS_',cn_now)
+  png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+  print(survp, newpage = FALSE)
+  dev.off()
+}
+```
+
+# Two-year OS comparison (Samstein et al. cohort)
+```{r}
+cols = c('blue', "gray45","gray85", "#001219", "#005f73", "#0a9396", "#94d2bd", "#e9d8a6", "#ee9b00", "#ca6702", "#bb3e03", "#ae2012", "#9b2226")
+
+twoyrOSrate_TMB = data.frame()
+cancerData=data.frame(mskcc_df$TMB_score,mskcc_df$OS_Months,mskcc_df$OS_Event)
+colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+sfit <- survfit(Surv(OS_Months,OS_Event) ~ Score, data=cancerData)
+OS_rates = summary(sfit,time=c(24),extend=TRUE)$surv
+twoyrOSrate_TMB = rbind(twoyrOSrate_TMB,data.frame(OS_rates[1],OS_rates[2],row.names = 'All'))
+for (ct in cancerType_list){
+  data_ct = mskcc_df[mskcc_df['CancerType']==ct,]
+  cancerData=data.frame(data_ct$TMB_score,data_ct$OS_Months,data_ct$OS_Event)
+  colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+  sfit <- survfit(Surv(OS_Months,OS_Event) ~ Score, data=cancerData)
+  OS_rates = summary(sfit,time=c(24),extend=TRUE)$surv
+  twoyrOSrate_TMB = rbind(twoyrOSrate_TMB,data.frame(OS_rates[1],OS_rates[2],row.names = ct))
+}
+
+twoyrOSrate_TMBL_AS = data.frame()
+mskcc_df_TMBL = mskcc_df[mskcc_df['TMB_score']=='low',]
+cancerData=data.frame(mskcc_df_TMBL[paste0(stratify_var,'_score')],mskcc_df_TMBL$OS_Months,mskcc_df_TMBL$OS_Event)
+colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+sfit <- survfit(Surv(OS_Months,OS_Event) ~ Score, data=cancerData)
+OS_rates = summary(sfit,time=c(24),extend=TRUE)$surv
+twoyrOSrate_TMBL_AS = rbind(twoyrOSrate_TMBL_AS,data.frame(OS_rates[1],OS_rates[2],row.names = 'All'))
+for (ct in cancerType_list){
+  data_ct = mskcc_df_TMBL[mskcc_df_TMBL['CancerType']==ct,]
+  cancerData=data.frame(data_ct[paste0(stratify_var,'_score')],data_ct$OS_Months,data_ct$OS_Event)
+  colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+  sfit <- survfit(Surv(OS_Months,OS_Event) ~ Score, data=cancerData)
+  OS_rates = summary(sfit,time=c(24),extend=TRUE)$surv
+  twoyrOSrate_TMBL_AS = rbind(twoyrOSrate_TMBL_AS,data.frame(OS_rates[1],OS_rates[2],row.names = ct))
+}
+
+OS2yr_each_cancer = cbind(twoyrOSrate_TMB, twoyrOSrate_TMBL_AS)
+
+colnames(OS2yr_each_cancer) = c('twoyr_high_tmb','twoyr_low_tmb','twoyr_low_tmb_high_as','twoyr_low_tmb_low_as')
+OS2yr_each_cancer['CANCER_TYPE'] = rownames(OS2yr_each_cancer)
+
+if (stratify_var == 'AS'){
+  ggpaired(OS2yr_each_cancer %>% rename(`High AS` = twoyr_low_tmb_high_as,
+                                  `Low AS` = twoyr_low_tmb_low_as), 
+           cond1 = "High AS", cond2 = "Low AS", line.color = "CANCER_TYPE", line.size = 1,
+           fill = "gray65",
+           palette = cols, xlab = "AS group", legend.title = "Cancer type", ylab = "Two-year overall survival") +
+    stat_compare_means(paired = T) +
+    theme(legend.position = "right") +
+    ylim(0, 1)
+  ggsave(paste0(main_fig_dir,"Samstein_TMB_AS_Surv_Comparison.pdf"), width = 5.5, height = 3)
+}else if (stratify_var == 'FGA'){
+  ggpaired(OS2yr_each_cancer %>% rename(`High FGA` = twoyr_low_tmb_high_as,
+                                  `Low FGA` = twoyr_low_tmb_low_as), 
+           cond1 = "High FGA", cond2 = "Low FGA", line.color = "CANCER_TYPE", line.size = 1,
+           fill = "gray65",
+           palette = cols, xlab = "FGA group", legend.title = "Cancer type", ylab = "Two-year overall survival") +
+    stat_compare_means(paired = T) +
+    theme(legend.position = "right") +
+    #scale_x_discrete( breaks=c("High FGA","Low FGA"), labels=c("High","Low"))+
+    ylim(0, 1)
+  ggsave(paste0(main_fig_dir,"Samstein_TMB_FGA_Surv_Comparison.pdf"), width = 5.5, height = 3)
+}
+```
+
+# Multivariable hazard ratio comparison (Samstein et al. cohort)
+```{r}
+cols <- c("gray45", "gray85", "#001219", "#005f73", "#0a9396", "#94d2bd", "#e9d8a6", "#ee9b00", "#ca6702", "#bb3e03", "#ae2012", "#9b2226")
+
+data_for_HR = mskcc_df # data_all_new_TMBL
+HR_each_cancer = data.frame()
+for (ct in cancerType_list){
+  model <- coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `AS` + `Drug class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
+  HR_ct1 = exp(model$coefficients[['AS']])
+  model <- coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `FGA` + `Drug class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
+  HR_ct2 = exp(model$coefficients[['FGA']])
+  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct1,HR_ct2,row.names = ct))
+}
+colnames(HR_each_cancer) = c('HR_AS','HR_FGA')
+HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
+ggpaired(HR_each_cancer %>% rename(`AS` = HR_AS,
+                                   `FGA` = HR_FGA), 
+         cond1 = "AS", cond2 = "FGA", line.color = "CANCER_TYPE", line.size = 1,
+         fill = "gray65",
+         palette = cols, xlab = "Metric", legend.title = "", ylab = "Multivariable hazard ratio") +
+  stat_compare_means(paired = T) +
+  theme(legend.position = "right") +
+  ylim(0, 4)
+ggsave(paste0(main_fig_dir,"HR_AS_FGA_Comparison.pdf"), width = 5.5, height = 3)
+```
+
+# Correlation between FGA and AS (Samstein et al. cohort)
+```{r}
+ggscatter(data_for_HR %>% drop_na(AS, FGA), x = "AS", y = "FGA", 
+          shape = 21, fill = "CancerType", palette = cols, xlab = "Aneuploidy score", ylab = "FGA", add = "reg.line", legend.title = "Cancer type", legend = "right") + 
+  stat_cor(method = "spearman")
+ggsave(paste0(main_fig_dir,"AS_FGA_Corr.pdf"), width = 5.5, height = 3)
+```
+
+
+
+
+
+
+
+
+
+# load data (Chowell et al cohort)
+```{r}
+features = c('TMB', 'FCNA', 'Cancer_type_grouped_2', 'Response (1:Responder; 0:Non-responder)', 'OS_Event', 'OS_Months', 'PFS_Event', 'PFS_Months') 
+data_train = read_excel("41587_2021_1070_MOESM3_ESM.xlsx", sheet = 'Training')
+data_test = read_excel("41587_2021_1070_MOESM3_ESM.xlsx", sheet = 'Test')
+data_all = rbind(data_train, data_test)
+data_all = data_all[features]
+colnames(data_all) = c('TMB', 'FCNA', 'CancerType', 'Response', 'OS_Event', 'OS_Months', 'PFS_Event', 'PFS_Months') 
+```
+
+# Overall survival and progression-free survival (Chowell cohort)
+```{r}
+cancerType_list = unique(data_all['CancerType'])$CancerType
+data_all_new = data.frame()
+
+stratify_var1 = 'TMB' 
+stratify_cutoff1 = 0.8
+stratify_var2 = 'FCNA' 
+stratify_cutoff2 = 0.5
+
+for (ct in cancerType_list){
+  data_ct = data_all[data_all['CancerType']==ct,]
+  data_ct[paste0(stratify_var1,'_score')] = 'low'
+  data_ct[paste0(stratify_var2,'_score')] = 'low'
+  SV1_high_idx = data_ct[stratify_var1]>=quantile(data_ct[[stratify_var1]],stratify_cutoff1)
+  SV2_high_idx = data_ct[stratify_var2]>=quantile(data_ct[[stratify_var2]],stratify_cutoff2)
+  data_ct[SV1_high_idx, paste0(stratify_var1,'_score')] = 'high'
+  data_ct[SV2_high_idx, paste0(stratify_var2,'_score')] = 'high'
+  data_all_new = rbind(data_all_new, data_ct)
+}
+
+data_plot = data_all_new[data_all_new['TMB_score']=='low',]
+##### OS
+cancerData=data.frame(data_plot[paste0(stratify_var2,'_score')],data_plot$OS_Months,data_plot$OS_Event)
+colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+sfit <- survfit(Surv(data_plot$OS_Months,data_plot$OS_Event) ~ Score, data=cancerData)
+scox <- coxph(Surv(data_plot$OS_Months,data_plot$OS_Event)~Score, data=cancerData)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(paste(c('OS', 'Chowell Pan-Cancer', round(P_value,5), round(HR_value,2)), collapse= " "))
+##### plot
+fontSize = 13
+survp=ggsurvplot(
+  sfit,
+  data = cancerData,
+  size = 1,                 # change line size
+  palette =
+    c("#E7B800", "#2E9FDF"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  #pval = FALSE,              # Add p-value
+  #pval.coord = c(70*0.65, 0.55),
+  xlim = c(0,80),
+  ylim=c(0,1),
+  xlab = "Time in months",
+  break.time.by = 10,
+  risk.table=TRUE,
+  risk.table.height = 0.29, # Useful to change when you have multiple groups
+  risk.table.pos="out",
+  risk.table.col="black",
+  risk.table.y.text = FALSE,
+  tables.y.text = FALSE, 
+  tables.theme = theme_cleantable(),
+  legend.labs =c("FGA high", "FGA low"),    # Change legend labels
+  legend.title="",
+  legend = c(0.6, 0.9), # legend relative position
+  font.main = c(fontSize),
+  font.caption = c(fontSize),
+  font.legend = c(fontSize),
+  font.tickslab = c(fontSize),
+  font.x = c(fontSize),
+  font.y = c(fontSize),
+  ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+  font.family = "Arial"
+)+ 
+  guides(colour = guide_legend(nrow = 1)) # legend in rows
+survp$plot <- survp$plot+ 
+              ggplot2::annotate("text", x=10, y=0.15, label=paste0('p',' = ',round(P_value,3), '\n', 'HR',' = ',round(HR_value,2)),size = 5)
+title_str = 'Chowell_PanCancer_OS_TMBL_FGA'
+png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+print(survp, newpage = FALSE)
+dev.off()
+
+for (ct in cancerType_list){
+  data_temp = data_plot[data_plot$CancerType==ct,]
+  cancerData=data.frame(data_temp[paste0(stratify_var2,'_score')],data_temp$OS_Months,data_temp$OS_Event)
+  colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+  sfit <- survfit(Surv(data_temp$OS_Months,data_temp$OS_Event) ~ Score, data=cancerData)
+  scox <- coxph(Surv(data_temp$OS_Months,data_temp$OS_Event)~Score, data=cancerData)
+  scox_coef = summary(scox)$coefficients
+  HR_value = scox_coef[2] # hazard ratio
+  Z_value=scox_coef[4]
+  P_value=scox_coef[5]
+  print(paste(c('OS', 'Chowell', ct, round(P_value,5), round(HR_value,2)), collapse= " "))
+  ##### plot
+  fontSize = 13
+  survp=ggsurvplot(
+    sfit,
+    data = cancerData,
+    size = 1,                 # change line size
+    palette =
+      c("#E7B800", "#2E9FDF"),# custom color palettes
+    conf.int = TRUE,          # Add confidence interval
+    #pval = FALSE,              # Add p-value
+    #pval.coord = c(70*0.65, 0.55),
+    xlim = c(0,80),
+    ylim=c(0,1),
+    xlab = "Time in months",
+    break.time.by = 10,
+    risk.table=TRUE,
+    risk.table.height = 0.29, # Useful to change when you have multiple groups
+    risk.table.pos="out",
+    risk.table.col="black",
+    risk.table.y.text = FALSE,
+    tables.y.text = FALSE, 
+    tables.theme = theme_cleantable(),
+    legend.labs =c("High", "Low"),    # Change legend labels
+    legend.title="",
+    legend = c(2.65, 0.9), # legend relative position
+    font.main = c(fontSize),
+    font.caption = c(fontSize),
+    font.legend = c(fontSize),
+    font.tickslab = c(fontSize),
+    font.x = c(fontSize),
+    font.y = c(fontSize),
+    ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+    font.family = "Arial"
+  )+ 
+    guides(colour = guide_legend(nrow = 1)) # legend in rows
+  survp$plot <- survp$plot+ 
+              ggplot2::annotate("text", x=10, y=0.15, label=paste0('p',' = ',round(P_value,3), '\n', 'HR',' = ',round(HR_value,2)),size = 5)
+  title_str = paste0('Chowell_',ct,'_OS_TMBL_FGA')
+  png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+  print(survp, newpage = FALSE)
+  dev.off()
+}
+
+##### PFS
+cancerData=data.frame(data_plot[paste0(stratify_var2,'_score')],data_plot$PFS_Months,data_plot$PFS_Event)
+colnames(cancerData) = c("Score", "PFS_Months", "PFS_Event")
+sfit <- survfit(Surv(data_plot$PFS_Months,data_plot$PFS_Event) ~ Score, data=cancerData)
+scox <- coxph(Surv(data_plot$PFS_Months,data_plot$PFS_Event)~Score, data=cancerData)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(paste(c('PFS', 'Chowell Pan-Cancer', round(P_value,5), round(HR_value,2)), collapse= " "))
+##### plot
+fontSize = 13
+survp=ggsurvplot(
+  sfit,
+  data = cancerData,
+  size = 1,                 # change line size
+  palette =
+    c("#E7B800", "#2E9FDF"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  #pval = FALSE,              # Add p-value
+  #pval.coord = c(70*0.65, 0.55),
+  xlim = c(0,80),
+  ylim=c(0,1),
+  xlab = "Time in months",
+  break.time.by = 10,
+  risk.table=TRUE,
+  risk.table.height = 0.29, # Useful to change when you have multiple groups
+  risk.table.pos="out",
+  risk.table.col="black",
+  risk.table.y.text = FALSE,
+  tables.y.text = FALSE, 
+  tables.theme = theme_cleantable(),
+  legend.labs =c("High", "Low"),    # Change legend labels
+  legend.title="",
+  legend = c(0.6, 0.9), # legend relative position
+  font.main = c(fontSize),
+  font.caption = c(fontSize),
+  font.legend = c(fontSize),
+  font.tickslab = c(fontSize),
+  font.x = c(fontSize),
+  font.y = c(fontSize),
+  ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+  font.family = "Arial"
+)+ 
+  guides(colour = guide_legend(nrow = 1)) # legend in rows
+survp$plot <- survp$plot+ 
+              ggplot2::annotate("text", x=10, y=0.15, label=paste0('p',' = ',round(P_value,5), '\n', 'HR',' = ',round(HR_value,2)),size = 5)
+title_str = 'Chowell_PanCancer_PFS_TMBL_FGA'
+png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+print(survp, newpage = FALSE)
+dev.off()
+
+for (ct in cancerType_list){
+  data_temp = data_plot[data_plot$CancerType==ct,]
+  cancerData=data.frame(data_temp[paste0(stratify_var2,'_score')],data_temp$PFS_Months,data_temp$PFS_Event)
+  colnames(cancerData) = c("Score", "PFS_Months", "PFS_Event")
+  sfit <- survfit(Surv(data_temp$PFS_Months,data_temp$PFS_Event) ~ Score, data=cancerData)
+  scox <- coxph(Surv(data_temp$PFS_Months,data_temp$PFS_Event)~Score, data=cancerData)
+  scox_coef = summary(scox)$coefficients
+  HR_value = scox_coef[2] # hazard ratio
+  Z_value=scox_coef[4]
+  P_value=scox_coef[5]
+  print(paste(c('PFS', 'Chowell', ct, round(P_value,5), round(HR_value,2)), collapse= " "))
+  ##### plot
+  fontSize = 13
+  survp=ggsurvplot(
+    sfit,
+    data = cancerData,
+    size = 1,                 # change line size
+    palette =
+      c("#E7B800", "#2E9FDF"),# custom color palettes
+    conf.int = TRUE,          # Add confidence interval
+    #pval = FALSE,              # Add p-value
+    #pval.coord = c(70*0.65, 0.55),
+    xlim = c(0,80),
+    ylim=c(0,1),
+    xlab = "Time in months",
+    break.time.by = 10,
+    risk.table=TRUE,
+    risk.table.height = 0.29, # Useful to change when you have multiple groups
+    risk.table.pos="out",
+    risk.table.col="black",
+    risk.table.y.text = FALSE,
+    tables.y.text = FALSE, 
+    tables.theme = theme_cleantable(),
+    legend.labs =c("High", "Low"),    # Change legend labels
+    legend.title="",
+    legend = c(2.65, 0.9), # legend relative position
+    font.main = c(fontSize),
+    font.caption = c(fontSize),
+    font.legend = c(fontSize),
+    font.tickslab = c(fontSize),
+    font.x = c(fontSize),
+    font.y = c(fontSize),
+    ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+    font.family = "Arial"
+  )+ 
+    guides(colour = guide_legend(nrow = 1)) # legend in rows
+  survp$plot <- survp$plot+ 
+              ggplot2::annotate("text", x=10, y=0.15, label=paste0('p',' = ',round(P_value,3), '\n', 'HR',' = ',round(HR_value,2)),size = 5)
+  title_str = paste0('Chowell_',ct,'_PFS_TMBL_FGA')
+  png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+  print(survp, newpage = FALSE)
+  dev.off()
+}
+```
+
+# 2-yr OS comparison (Chowell cohort)
+```{r}
+data_plot = data_all_new[data_all_new['TMB_score']=='low',]
+data_plot['twoyr_OS'] = NA
+data_plot[data_plot$OS_Months>=24,'twoyr_OS'] = 1
+data_plot[(data_plot$OS_Months<24)&(data_plot$OS_Event==1),'twoyr_OS'] = 0
+##### OS
+cancerData=data.frame(data_plot['twoyr_OS'], -data_plot[stratify_var2], data_plot['TMB'])
+colnames(cancerData) = c("twoyr_OS", "Score",'TMB')
+AUC_p = roc.area(cancerData[,1], cancerData[,2])
+#auc_val = AUC_p$A
+pval = AUC_p$p.value
+my_roc <- roc(cancerData[,1], cancerData[,2])
+cutoff = coords(my_roc, "best", ret = "threshold", best.method="youden") # youden: max(sensitivities + specificities)
+
+title_str = 'Chowell_PanCancer_twoyrOS_TMBL_FGA'
+roc_RecR=roc(cancerData[,1], cancerData[,2]) #AUC score
+g = ggroc(roc_RecR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+  annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_RecR$auc[1],2),"\np =", round(pval,3))) 
+
+g = g + theme_classic() +
+  theme(
+    axis.text.x = element_text(color="black"),
+    axis.text.y = element_text(color="black"),
+    axis.ticks = element_line(color = "black")
+  ) + xlab("FPR") + ylab("TPR") + 
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+print(g, newpage = FALSE)
+dev.off()
+
+for (ct in cancerType_list){
+  data_temp = data_plot[data_plot$CancerType==ct,]
+  cancerData=data.frame(data_temp['twoyr_OS'], -data_temp[stratify_var2], data_temp['TMB'])
+  colnames(cancerData) = c("Response", "Score",'TMB')
+  AUC_p = roc.area(cancerData[,1], cancerData[,2])
+  #auc_val = AUC_p$A
+  pval = AUC_p$p.value
+  my_roc <- roc(cancerData[,1], cancerData[,2])
+  cutoff = coords(my_roc, "best", ret = "threshold", best.method="youden") # youden: max(sensitivities + specificities)
+  
+  roc_RecR=roc(cancerData[,1], cancerData[,2]) #AUC score
+  g = ggroc(roc_RecR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+    annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_RecR$auc[1],2),"\np =", round(pval,3))) 
+  
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+    geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  title_str = paste0('Chowell_',ct,'_twoyrOS_TMBL_FGA')
+  png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+}
+
+```
+
+# ORR comparison (Chowell cohort)
+```{r}
+data_plot = data_all_new[data_all_new['TMB_score']=='low',]
+##### OS
+cancerData=data.frame(data_plot['Response'], -data_plot[stratify_var2], data_plot['TMB'])
+colnames(cancerData) = c("Response", "Score", 'TMB')
+AUC_p = roc.area(cancerData[,1], cancerData[,2])
+#auc_val = AUC_p$A
+pval = AUC_p$p.value
+my_roc <- roc(cancerData[,1], cancerData[,2])
+cutoff = coords(my_roc, "best", ret = "threshold", best.method="youden") # youden: max(sensitivities + specificities)
+
+title_str = 'Chowell_PanCancer_ORR_TMBL_FGA'
+roc_RecR=roc(cancerData[,1], cancerData[,2]) #AUC score
+g = ggroc(roc_RecR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+  annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_RecR$auc[1],2),"\np =", round(pval,3))) 
+
+g = g + theme_classic() +
+  theme(
+    axis.text.x = element_text(color="black"),
+    axis.text.y = element_text(color="black"),
+    axis.ticks = element_line(color = "black")
+  ) + xlab("FPR") + ylab("TPR") + 
+  geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+print(g, newpage = FALSE)
+dev.off()
+
+for (ct in cancerType_list){
+  data_temp = data_plot[data_plot$CancerType==ct,]
+  cancerData=data.frame(data_temp['Response'], -data_temp[stratify_var2], data_temp['TMB'])
+  colnames(cancerData) = c("Response", "Score", 'TMB')
+  AUC_p = roc.area(cancerData[,1], cancerData[,2])
+  #auc_val = AUC_p$A
+  pval = AUC_p$p.value
+  my_roc <- roc(cancerData[,1], cancerData[,2])
+  cutoff = coords(my_roc, "best", ret = "threshold", best.method="youden") # youden: max(sensitivities + specificities)
+  
+  roc_RecR=roc(cancerData[,1], cancerData[,2]) #AUC score
+  g = ggroc(roc_RecR, colour = 'black', size = 1, legacy.axes = TRUE)  +
+    annotate("text", x = .6, y = .15, label = paste("AUC =", round(roc_RecR$auc[1],2),"\np =", round(pval,3))) 
+  
+  g = g + theme_classic() +
+    theme(
+      axis.text.x = element_text(color="black"),
+      axis.text.y = element_text(color="black"),
+      axis.ticks = element_line(color = "black")
+    ) + xlab("FPR") + ylab("TPR") + 
+    geom_segment(aes(x = 0, xend = 1, y = 0, yend = 1), color="darkgray", linetype="dashed")
+  title_str = paste0('Chowell_',ct,'_ORR_TMBL_FGA')
+  png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=200,width=400, height=350) # width=700, height=600
+  print(g, newpage = FALSE)
+  dev.off()
+}
+```
