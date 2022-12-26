@@ -1,4 +1,4 @@
-# TumorAneuploidyFGA
+# Aneuploidy-FGA-ICB
 Test predictive power of tumor aneuploidy and fraction of copy-number alterations in prediction of patient overall survival after immunotherapy in different cancer types.
 
 # Usage
