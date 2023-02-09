@@ -1,0 +1,5 @@
+./output/output0.41
+Amplification LCR threshold: 0.41
+Deletion LCR threshold: -0.41
+Arm-level alteration call threshold: 0.7
+Percent of segments exceeding noise threshold: NA%
