@@ -1,3 +1,23 @@
+---
+title: "Optimizing cancer immunotherapy response prediction by tumor aneuploidy score and fraction of copy number alterations"
+author: "Tiangen Chang"
+output: 
+  rmarkdown::html_vignette:
+    toc: true
+    toc_depth: 2
+vignette: >
+  %\VignetteIndexEntry{}
+  %\VignetteEngine{knitr::rmarkdown}
+  %\VignetteEncoding{UTF-8}
+---
+
+
+```{r}
+# clear all objects including hidden objects
+rm(list = ls(all.names = TRUE))
+# free up memory and report the memory usage
+gc()
+```
 
 # load required package
 ```{r}
@@ -13,14 +33,20 @@ library(pROC)
 library(scales)
 library(RColorBrewer)
 library(stats)
+library(ggplot2)
+library(reshape2)
+library(lemon)
+library(forestplot)
+library(powerSurvEpi)
+library(gridExtra)
 
 ```
 
 # Set parameters and directories
 ```{r}
 main_fig_dir = "./Results/"
-cols <- c("#888888", "#88CCEE", "#CC6677", "#DDCC77", "#117733", "#332288", "#AA4499", "#44AA99", "#999933", "#882255", "#661100", "#6699CC")
-show_col(cols)
+cols0 <- c("#888888", "#88CCEE", "#CC6677", "#DDCC77", "#117733", "#332288", "#AA4499", "#44AA99", "#999933", "#882255", "#661100", "#6699CC")
+
 ```
 
 # load data (Samstein et al. cohort)
@@ -66,10 +92,8 @@ for (fga_temp in seq(0.02,0.5,0.01)){
 colnames(fga_df) = c("ID", paste0("fga", seq(0.01,0.5,0.01)))
 
 samstein_df0 = left_join(samstein_df0, fga_df, by = c("SAMPLE_ID" = "ID"))
-write.csv(samstein_df0,file = 'MSK_allInfo.csv',row.names = FALSE)
 
-
-############################ Calculate the AS* and FGA* using elbow points as cutoffs for individual cancer types ############################
+############################ Calculate the AS* and FGA* using elbow points as cutoffs for individual cancer types ##################
 AS_FGA_star_df = samstein_df0[c("CANCER_TYPE","aneuploidy_score0.01","fga0.01")]
 colnames(AS_FGA_star_df) = c("CANCER_TYPE","AS_star","FGA_star")
 AS_FGA_star_df$AS_star = -1
@@ -86,33 +110,26 @@ samstein_df0$AS_star = AS_FGA_star_df$AS_star
 samstein_df0$FGA_star = AS_FGA_star_df$FGA_star
 ############################ Calculate the AS* using elbow points as cutoffs for individual cancer types ############################
 
-
-
-samstein_df0 = samstein_df0 %>% group_by(CANCER_TYPE) %>% mutate(
-         tmb_bin = ifelse(TMB_NONSYNONYMOUS >= quantile(TMB_NONSYNONYMOUS, 0.8), "high", "low"),
-         tmb_bin_10 = ifelse(TMB_NONSYNONYMOUS >= 10, "high", "low"))
-
-samstein_df = samstein_df0[c('CANCER_TYPE', 'TMB_NONSYNONYMOUS', 'AGE_AT_SEQ_REPORT', 'SEX', 'SAMPLE_TYPE', 'OS_MONTHS', 'OS_STATUS', 'DRUG_TYPE', 'aneuploidy_score0.1', 'aneuploidy_score0.15', 'aneuploidy_score0.2', 'fga0.1', 'fga0.15', 'fga0.2', 'tmb_bin', 'tmb_bin_10', "AS_star", "FGA_star")]
-colnames(samstein_df) = c('CancerType', 'TMB', 'Age', 'Sex', 'Sample_type', 'OS_Months', 'OS_Event', 'Drug_class', 'AS0.1', 'AS0.15', 'AS0.2', 'FGA0.1', 'FGA0.15', 'FGA0.2', 'TMB_score', 'TMB_10', "ASstar", "FGAstar")
+samstein_df = samstein_df0[c('SAMPLE_ID', 'CANCER_TYPE', 'TMB_NONSYNONYMOUS', 'AGE_AT_SEQ_REPORT', 'SEX', 'SAMPLE_TYPE', 'TUMOR_PURITY', 'OS_MONTHS', 'OS_STATUS', 'DRUG_TYPE', 'aneuploidy_score0.1', 'aneuploidy_score0.2', 'fga0.1', 'fga0.2', "AS_star", "FGA_star")]
+colnames(samstein_df) = c('SampleID', 'CancerType', 'TMB', 'Age', 'Sex', 'Sample_type', 'TumorPurity', 'OS_Months', 'OS_Event', 'Drug_class', 'AS0.1', 'AS0.2', 'FGA0.1', 'FGA0.2', "ASstar", "FGAstar")
 samstein_df$CancerType <- tolower(samstein_df$CancerType)
 
-capFirst <- function(s) {
-    paste(toupper(substring(s, 1, 1)), substring(s, 2), sep = "")
-}
-samstein_df$CancerType <- capFirst(samstein_df$CancerType)
+samstein_df$CancerType <- str_to_sentence(tolower(samstein_df$CancerType))
 
 cancerType_samstein = sort(unique(samstein_df['CancerType'])$CancerType)
+
+samstein_df$TumorPurity <- ifelse(is.na(as.numeric(samstein_df$TumorPurity)), NA, as.numeric(samstein_df$TumorPurity))
 
 ```
 
 # load data (Chowell et al cohort)
 ```{r}
-features = c('TMB', 'FCNA', 'Cancer_type_grouped_2','Drug_class', 'OS_Event', 'OS_Months') 
+features = c('TMB', 'Age', 'Sex (1:Male; 0:Female)', 'FCNA', 'Cancer_type_grouped_2','Drug_class', 'OS_Event', 'OS_Months') 
 data_train = read_excel("41587_2021_1070_MOESM3_ESM.xlsx", sheet = 'Training')
 data_test = read_excel("41587_2021_1070_MOESM3_ESM.xlsx", sheet = 'Test')
 chowell_df = rbind(data_train, data_test)
 chowell_df = chowell_df[features]
-colnames(chowell_df) = c('TMB', 'FGA', 'CancerType','Drug_class', 'OS_Event', 'OS_Months') 
+colnames(chowell_df) = c('TMB', 'Age', 'Sex', 'FGA', 'CancerType','Drug_class', 'OS_Event', 'OS_Months') 
 
 chowell_df = chowell_df %>% mutate(across('CancerType', str_replace, 'Bladder', 'Bladder cancer'),
                    across('CancerType', str_replace, 'Breast', 'Breast cancer'),
@@ -131,7 +148,7 @@ chowell_df = chowell_df %>% mutate(across('CancerType', str_replace, 'Bladder', 
                    )
 # chowell_df = chowell_df[chowell_df$CancerType %in% cancerType_samstein,]
 
-colnames(chowell_df) = c('TMB','FGA0.2','CancerType','Drug_class','OS_Event','OS_Months')
+colnames(chowell_df) = c('TMB', 'Age', 'Sex','FGA0.2','CancerType','Drug_class','OS_Event','OS_Months')
 
 cancerType_chowell = sort(unique(chowell_df['CancerType'])$CancerType)
 
@@ -139,12 +156,135 @@ cancerType_mskcc = sort(union(cancerType_chowell, cancerType_samstein))
 
 ```
 
+# Figure 1: Multivariable hazard ratio comparison: AS0.1 versus AS0.2 , FGA0.1 versus FGA0.2 (Samstein et al. cohort)
+```{r}
+cols <- cols0
+data_for_HR = samstein_df
 
-# determine optimal AS0.1/AS* percentile threshold by building multivariable Cox model under different thresholds
+############################################# MHR: AS0.1 versus AS0.2 ############################################
+HR_each_cancer = data.frame()
+model1 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `AS0.1` + `Drug_class`, data = data_for_HR) 
+model2 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `AS0.2` + `Drug_class`, data = data_for_HR) 
+HR_ct1 = exp(model1$coefficients[['AS0.1']])
+HR_ct1_025 = exp(confint(model1))['AS0.1',1]
+HR_ct1_975 = exp(confint(model1))['AS0.1',2]
+p_ct1 = summary(model1)$coefficients['AS0.1',5]
+
+HR_ct2 = exp(model2$coefficients[['AS0.2']])
+HR_ct2_025 = exp(confint(model2))['AS0.2',1]
+HR_ct2_975 = exp(confint(model2))['AS0.2',2]
+p_ct2 = summary(model2)$coefficients['AS0.2',5]
+HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct1,HR_ct1_025,HR_ct1_975,p_ct1,HR_ct2,HR_ct2_025,HR_ct2_975,p_ct2,row.names = 'All'))
+
+for (ct in cancerType_samstein){
+  
+  model1 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `AS0.1` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
+  model2 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `AS0.2` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
+  HR_ct1 = exp(model1$coefficients[['AS0.1']])
+  HR_ct1_025 = exp(confint(model1))['AS0.1',1]
+  HR_ct1_975 = exp(confint(model1))['AS0.1',2]
+  p_ct1 = summary(model1)$coefficients['AS0.1',5]
+  
+  HR_ct2 = exp(model2$coefficients[['AS0.2']])
+  HR_ct2_025 = exp(confint(model2))['AS0.2',1]
+  HR_ct2_975 = exp(confint(model2))['AS0.2',2]
+  p_ct2 = summary(model2)$coefficients['AS0.2',5]
+  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct1,HR_ct1_025,HR_ct1_975,p_ct1,HR_ct2,HR_ct2_025,HR_ct2_975,p_ct2,row.names = ct))
+}
+colnames(HR_each_cancer) = c('HR_AS0.1','HR_AS0.1_025','HR_AS0.1_975','p_AS0.1','HR_AS0.2','HR_AS0.2_025','HR_AS0.2_975','p_AS0.2')
+HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
+ggpaired(HR_each_cancer %>% rename(`AS0.1` = HR_AS0.1,
+                                   `AS0.2` = HR_AS0.2), 
+         cond1 = "AS0.1", cond2 = "AS0.2", line.color = "CANCER_TYPE", line.size = 1,
+         fill = "gray65",
+         palette = cols, xlab = "Metric", legend.title = "", ylab = "Multivariable hazard ratio") +
+  stat_compare_means(paired = T) +
+  theme(legend.position = "right") +
+  ylim(0.4, 5.5) +
+  scale_x_discrete(labels = expression(AS[0.1], AS[0.2]))
+ggsave(paste0(main_fig_dir,paste0("Samstein_AS0.1_AS0.2_MHR_Comparison.pdf")), width = 4.4*1.2, height = 3*1.2)
+
+print(paste("MHR (AS0.1 versus AS0.2):",mean(HR_each_cancer$HR_AS0.1),mean(HR_each_cancer$HR_AS0.2)))
+
+
+
+############################################# MHR: FGA0.1 versus FGA0.2 ##############################################
+HR_each_cancer = data.frame()
+model1 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `FGA0.1` + `Drug_class`, data = data_for_HR) 
+model2 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `FGA0.2` + `Drug_class`, data = data_for_HR) 
+HR_ct1 = exp(model1$coefficients[['FGA0.1']])
+HR_ct1_025 = exp(confint(model1))['FGA0.1',1]
+HR_ct1_975 = exp(confint(model1))['FGA0.1',2]
+p_ct1 = summary(model1)$coefficients['FGA0.1',5]
+
+HR_ct2 = exp(model2$coefficients[['FGA0.2']])
+HR_ct2_025 = exp(confint(model2))['FGA0.2',1]
+HR_ct2_975 = exp(confint(model2))['FGA0.2',2]
+p_ct2 = summary(model2)$coefficients['FGA0.2',5]
+HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct1,HR_ct1_025,HR_ct1_975,p_ct1,HR_ct2,HR_ct2_025,HR_ct2_975,p_ct2,row.names = 'All'))
+
+for (ct in cancerType_samstein){
+  
+  model1 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `FGA0.1` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
+  model2 = coxph(Surv(OS_Months, OS_Event) ~ `TMB` + `FGA0.2` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
+  HR_ct1 = exp(model1$coefficients[['FGA0.1']])
+  HR_ct1_025 = exp(confint(model1))['FGA0.1',1]
+  HR_ct1_975 = exp(confint(model1))['FGA0.1',2]
+  p_ct1 = summary(model1)$coefficients['FGA0.1',5]
+  
+  HR_ct2 = exp(model2$coefficients[['FGA0.2']])
+  HR_ct2_025 = exp(confint(model2))['FGA0.2',1]
+  HR_ct2_975 = exp(confint(model2))['FGA0.2',2]
+  p_ct2 = summary(model2)$coefficients['FGA0.2',5]
+  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct1,HR_ct1_025,HR_ct1_975,p_ct1,HR_ct2,HR_ct2_025,HR_ct2_975,p_ct2,row.names = ct))
+}
+colnames(HR_each_cancer) = c('HR_FGA0.1','HR_FGA0.1_025','HR_FGA0.1_975','p_FGA0.1','HR_FGA0.2','HR_FGA0.2_025','HR_FGA0.2_975','p_FGA0.2')
+HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
+ggpaired(HR_each_cancer %>% rename(`FGA0.1` = HR_FGA0.1,
+                                   `FGA0.2` = HR_FGA0.2), 
+         cond1 = "FGA0.1", cond2 = "FGA0.2", line.color = "CANCER_TYPE", line.size = 1,
+         fill = "gray65",
+         palette = cols, xlab = "Metric", legend.title = "", ylab = "Multivariable hazard ratio") +
+  stat_compare_means(paired = T) +
+  theme(legend.position = "right") +
+  ylim(0.4, 5.5) +
+  scale_x_discrete(labels = expression(FGA[0.1], FGA[0.2]))
+ggsave(paste0(main_fig_dir,paste0("Samstein_FGA0.1_FGA0.2_MHR_Comparison.pdf")), width = 4.4*1.2, height = 3*1.2)
+
+print(paste("MHR (FGA0.1 versus FGA0.2):",mean(HR_each_cancer$HR_FGA0.1),mean(HR_each_cancer$HR_FGA0.2)))
+
+```
+
+
+# Figure 2a: determine optimal FGA0.1/AS0.1/AS0.2/FGA0.2 percentile threshold by building multivariable Cox model under different thresholds
 ```{r}
 
-HR_diffCutoff = data.frame()
-for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
+samstein_df = samstein_df %>% group_by(CancerType) %>% mutate(
+         TMB_score = ifelse(TMB >= quantile(TMB, 0.8), "high", "low"),
+         )
+chowell_df = chowell_df %>% group_by(CancerType) %>% mutate(
+         TMB_score = ifelse(TMB >= quantile(TMB, 0.8), "high", "low"))
+
+HR_diffCutoff00 = data.frame()
+for (quant_cutoff in seq(0.1, 0.9, by=0.1)){
+  samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
+         FGA_score = ifelse(FGA0.1 >= quantile(FGA0.1, quant_cutoff), "high", "low"),
+         )
+  data_for_HR = samstein_df_temp
+  data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
+  data_for_HR$FGA_score <- relevel(factor(data_for_HR$FGA_score), ref = "low")
+  for (i in 1:dim(data_for_HR)[1]){ # dim(data_for_HR)[1]
+    data_for_HR_leaveOneOut = data_for_HR[-c(i),]
+    model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
+    HR_ct = exp(model$coefficients[['FGA_scorehigh']])
+    p_ct = summary(model)$coefficients['FGA_scorehigh',5]
+    HR_diffCutoff00 = rbind(HR_diffCutoff00,data.frame(HR_ct,p_ct,quant_cutoff,'FGA0.1'))
+  }
+}
+colnames(HR_diffCutoff00) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
+
+HR_diffCutoff0 = data.frame()
+for (quant_cutoff in seq(0.1, 0.9, by=0.1)){
   samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
          AS_score = ifelse(AS0.1 >= quantile(AS0.1, quant_cutoff), "high", "low"),
          )
@@ -156,173 +296,13 @@ for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
     model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
     HR_ct = exp(model$coefficients[['AS_scorehigh']])
     p_ct = summary(model)$coefficients['AS_scorehigh',5]
-    HR_diffCutoff = rbind(HR_diffCutoff,data.frame(HR_ct,p_ct,quant_cutoff,'AS0.1'))
+    HR_diffCutoff0 = rbind(HR_diffCutoff0,data.frame(HR_ct,p_ct,quant_cutoff,'AS0.1'))
   }
 }
-colnames(HR_diffCutoff) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
-
-HR_diffCutoff2 = data.frame()
-for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
-  samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
-         AS_score = ifelse(ASstar >= quantile(ASstar, quant_cutoff), "high", "low"),
-         )
-  data_for_HR = samstein_df_temp
-  data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
-  data_for_HR$AS_score <- relevel(factor(data_for_HR$AS_score), ref = "low")
-  for (i in 1:dim(data_for_HR)[1]){ # dim(data_for_HR)[1]
-    data_for_HR_leaveOneOut = data_for_HR[-c(i),]
-    model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
-    HR_ct = exp(model$coefficients[['AS_scorehigh']])
-    p_ct = summary(model)$coefficients['AS_scorehigh',5]
-    HR_diffCutoff2 = rbind(HR_diffCutoff2,data.frame(HR_ct,p_ct,quant_cutoff,'AS*'))
-  }
-}
-colnames(HR_diffCutoff2) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
-
-HR_diffCutoff = rbind(HR_diffCutoff, HR_diffCutoff2)
-
-grouped_data <- HR_diffCutoff %>% 
-  group_by(threshold, CNV_calling_cutoff) %>% 
-  summarize(HR_mean = mean(HR), 
-            #HR_sd_val = sd(HR), 
-            HR_q025 = quantile(HR, probs = .025),
-            HR_q975 = quantile(HR, probs = .975),
-            p_mean = mean(p_val), 
-            #p_sd_val = sd(p_val), 
-            p_q025 = quantile(p_val, probs = .025),
-            p_q975 = quantile(p_val, probs = .975))
-  
-grouped_data$p_mean = -log10(grouped_data$p_mean) # convert p values
-grouped_data$p_q025 = -log10(grouped_data$p_q025) # convert p values
-grouped_data$p_q975 = -log10(grouped_data$p_q975) # convert p values
-
-pdf(paste(main_fig_dir,"p_val_VS_threshold_AS0.1_ASstar.pdf",sep = ""),width=2, height=2.5)
-ggplot(grouped_data, aes(x = threshold, y = p_mean, color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
-  #geom_point() + 
-  geom_line(size=0.2) +
-  geom_ribbon(aes(ymin = p_q025, ymax = p_q975), alpha = 0.5, colour = NA) +
-  #geom_errorbar(aes(x = threshold, ymin = p_val_lower, ymax = p_val_upper), width = 0.04, data = grouped_data) +
-  #scale_color_discrete(name = "") + 
-  theme_bw()+
-  theme(legend.position= "none", #"none", c(0.8, 0.2)
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "-log10 (Wald P value)")
-dev.off()
-
-pdf(paste(main_fig_dir,"HR_VS_threshold_AS0.1_ASstar.pdf",sep = ""),width=2, height=2.5)
-ggplot(grouped_data, aes(x = threshold, y = HR_mean,color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
-  #geom_point() + 
-  geom_line(size=0.2) +
-  geom_ribbon(aes(ymin = HR_q025, ymax = HR_q975), alpha = 0.5, colour = NA) +
-  #geom_errorbar(aes(x = threshold, ymin = HR_lower, ymax = HR_upper), width = 0.04, data = grouped_data) +
-  #scale_color_discrete(name = "") + 
-  theme_bw()+
-  theme(legend.position="none",
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "Hazard ratio")
-dev.off()
-
-```
-
-
-
-# determine optimal FGA* percentile threshold by building multivariable Cox model under different thresholds
-```{r}
+colnames(HR_diffCutoff0) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
 
 HR_diffCutoff = data.frame()
-for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
-  samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
-         FGA_score = ifelse(FGAstar >= quantile(FGAstar, quant_cutoff), "high", "low"),
-         )
-  data_for_HR = samstein_df_temp
-  data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
-  data_for_HR$FGA_score <- relevel(factor(data_for_HR$FGA_score), ref = "low")
-  for (i in 1:dim(data_for_HR)[1]){ # dim(data_for_HR)[1]
-    data_for_HR_leaveOneOut = data_for_HR[-c(i),]
-    model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
-    HR_ct = exp(model$coefficients[['FGA_scorehigh']])
-    p_ct = summary(model)$coefficients['FGA_scorehigh',5]
-    HR_diffCutoff = rbind(HR_diffCutoff,data.frame(HR_ct,p_ct,quant_cutoff,'FGAstar'))
-  }
-}
-colnames(HR_diffCutoff) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
-
-grouped_data <- HR_diffCutoff %>% 
-  group_by(threshold, CNV_calling_cutoff) %>% 
-  summarize(HR_mean = mean(HR), 
-            #HR_sd_val = sd(HR), 
-            HR_q025 = quantile(HR, probs = .025),
-            HR_q975 = quantile(HR, probs = .975),
-            p_mean = mean(p_val), 
-            #p_sd_val = sd(p_val), 
-            p_q025 = quantile(p_val, probs = .025),
-            p_q975 = quantile(p_val, probs = .975))
-  
-grouped_data$p_mean = -log10(grouped_data$p_mean) # convert p values
-grouped_data$p_q025 = -log10(grouped_data$p_q025) # convert p values
-grouped_data$p_q975 = -log10(grouped_data$p_q975) # convert p values
-
-pdf(paste(main_fig_dir,"p_val_VS_threshold_FGAstar.pdf",sep = ""),width=2, height=2.5)
-ggplot(grouped_data, aes(x = threshold, y = p_mean, color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
-  #geom_point() + 
-  geom_line(size=0.2) +
-  geom_ribbon(aes(ymin = p_q025, ymax = p_q975), alpha = 0.5, colour = NA) +
-  #geom_errorbar(aes(x = threshold, ymin = p_val_lower, ymax = p_val_upper), width = 0.04, data = grouped_data) +
-  #scale_color_discrete(name = "") + 
-  theme_bw()+
-  theme(legend.position= "none", #"none", c(0.8, 0.2)
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "-log10 (Wald P value)")
-dev.off()
-
-pdf(paste(main_fig_dir,"HR_VS_threshold_FGAstar.pdf",sep = ""),width=2, height=2.5)
-ggplot(grouped_data, aes(x = threshold, y = HR_mean,color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
-  #geom_point() + 
-  geom_line(size=0.2) +
-  geom_ribbon(aes(ymin = HR_q025, ymax = HR_q975), alpha = 0.5, colour = NA) +
-  #geom_errorbar(aes(x = threshold, ymin = HR_lower, ymax = HR_upper), width = 0.04, data = grouped_data) +
-  #scale_color_discrete(name = "") + 
-  theme_bw()+
-  theme(legend.position="none",
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "Hazard ratio")
-dev.off()
-
-```
-
-# determine optimal AS0.2 & FGA0.2 percentile threshold by building multivariable Cox model under different thresholds
-```{r}
-
-HR_diffCutoff = data.frame()
-for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
+for (quant_cutoff in seq(0.1, 0.9, by=0.1)){
   samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
          AS_score = ifelse(AS0.2 >= quantile(AS0.2, quant_cutoff), "high", "low"),
          )
@@ -340,7 +320,7 @@ for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
 colnames(HR_diffCutoff) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
 
 HR_diffCutoff2 = data.frame()
-for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
+for (quant_cutoff in seq(0.1, 0.9, by=0.1)){
   samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
          FGA_score = ifelse(FGA0.2 >= quantile(FGA0.2, quant_cutoff), "high", "low"),
          )
@@ -357,7 +337,7 @@ for (quant_cutoff in seq(0.2, 0.8, by=0.1)){
 }
 colnames(HR_diffCutoff2) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
 
-HR_diffCutoff = rbind(HR_diffCutoff, HR_diffCutoff2)
+HR_diffCutoff = rbind(HR_diffCutoff00, HR_diffCutoff0, HR_diffCutoff, HR_diffCutoff2)
 
 grouped_data <- HR_diffCutoff %>% 
   group_by(threshold, CNV_calling_cutoff) %>% 
@@ -374,7 +354,7 @@ grouped_data$p_mean = -log10(grouped_data$p_mean) # convert p values
 grouped_data$p_q025 = -log10(grouped_data$p_q025) # convert p values
 grouped_data$p_q975 = -log10(grouped_data$p_q975) # convert p values
 
-pdf(paste(main_fig_dir,"p_val_VS_threshold_AS0.2_FGA0.2.pdf",sep = ""),width=2, height=2.5)
+pdf(paste(main_fig_dir,"p_val_VS_threshold_AS0.1_AS0.2_FGA0.2.pdf",sep = ""),width=2, height=2.5) # width=2, height=2.5
 ggplot(grouped_data, aes(x = threshold, y = p_mean, color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
   #geom_point() + 
   geom_line(size=0.2) +
@@ -382,7 +362,7 @@ ggplot(grouped_data, aes(x = threshold, y = p_mean, color = CNV_calling_cutoff, 
   #geom_errorbar(aes(x = threshold, ymin = p_val_lower, ymax = p_val_upper), width = 0.04, data = grouped_data) +
   #scale_color_discrete(name = "") + 
   theme_bw()+
-  theme(legend.position= "none", #"none", c(0.8, 0.2)
+  theme(legend.position= "none", #"none", "right"
         panel.border = element_blank(),
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
@@ -391,10 +371,12 @@ ggplot(grouped_data, aes(x = threshold, y = p_mean, color = CNV_calling_cutoff, 
         axis.text.x = element_text(color="black"),
         axis.text.y = element_text(color="black"),
         axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "-log10 (Wald P value)")
+  labs(x = "Threshold", y = "-log10 (Wald P value)") + 
+  scale_x_continuous(breaks = c(0.1, 0.3, 0.5, 0.7, 0.9),
+                     labels = c(0.1, 0.3, 0.5, 0.7, 0.9))
 dev.off()
 
-pdf(paste(main_fig_dir,"HR_VS_threshold_AS0.2_FGA0.2.pdf",sep = ""),width=2, height=2.5)
+pdf(paste(main_fig_dir,"HR_VS_threshold_AS0.1_AS0.2_FGA0.2.pdf",sep = ""),width=2, height=2.5)
 ggplot(grouped_data, aes(x = threshold, y = HR_mean,color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
   #geom_point() + 
   geom_line(size=0.2) +
@@ -411,153 +393,49 @@ ggplot(grouped_data, aes(x = threshold, y = HR_mean,color = CNV_calling_cutoff, 
         axis.text.x = element_text(color="black"),
         axis.text.y = element_text(color="black"),
         axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "Hazard ratio")
+  labs(x = "Threshold", y = "Hazard ratio") +
+  scale_x_continuous(breaks = c(0.1, 0.3, 0.5, 0.7, 0.9),
+                     labels = c(0.1, 0.3, 0.5, 0.7, 0.9))
 dev.off()
 
-```
 
 
-# determine optimal AS0.2 & FGA0.2 absolute threshold by building multivariable Cox model under different thresholds
-```{r}
-
-HR_diffCutoff = data.frame()
-for (abs_cutoff in seq(0.05, 0.8, by=0.01)){
-  samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
-         AS_score = ifelse(AS0.2 >= abs_cutoff, "high", "low"),
-         )
-  data_for_HR = samstein_df_temp
-  data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_10), ref = "low")
-  data_for_HR$AS_score <- relevel(factor(data_for_HR$AS_score), ref = "low")
-  for (i in 1:dim(data_for_HR)[1]){ # dim(data_for_HR)[1]
-    data_for_HR_leaveOneOut = data_for_HR[-c(i),]
-    model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
-    HR_ct = exp(model$coefficients[['AS_scorehigh']])
-    p_ct = summary(model)$coefficients['AS_scorehigh',5]
-    HR_diffCutoff = rbind(HR_diffCutoff,data.frame(HR_ct,p_ct,abs_cutoff,'AS0.2'))
-  }
-}
-colnames(HR_diffCutoff) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
-
-HR_diffCutoff2 = data.frame()
-for (abs_cutoff in seq(0.05, 0.8, by=0.01)){
-  samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
-         FGA_score = ifelse(FGA0.2 >= abs_cutoff, "high", "low"),
-         )
-  data_for_HR = samstein_df_temp
-  data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_10), ref = "low")
-  data_for_HR$FGA_score <- relevel(factor(data_for_HR$FGA_score), ref = "low")
-  for (i in 1:dim(data_for_HR)[1]){ # dim(data_for_HR)[1]
-    data_for_HR_leaveOneOut = data_for_HR[-c(i),]
-    model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
-    HR_ct = exp(model$coefficients[['FGA_scorehigh']])
-    p_ct = summary(model)$coefficients['FGA_scorehigh',5]
-    HR_diffCutoff2 = rbind(HR_diffCutoff2,data.frame(HR_ct,p_ct,abs_cutoff,'FGA0.2'))
-  }
-}
-colnames(HR_diffCutoff2) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
-
-HR_diffCutoff = rbind(HR_diffCutoff, HR_diffCutoff2)
-
-grouped_data <- HR_diffCutoff %>% 
-  group_by(threshold, CNV_calling_cutoff) %>% 
-  summarize(HR_mean = mean(HR), 
-            #HR_sd_val = sd(HR), 
-            HR_q025 = quantile(HR, probs = .025),
-            HR_q975 = quantile(HR, probs = .975),
-            p_mean = mean(p_val), 
-            #p_sd_val = sd(p_val), 
-            p_q025 = quantile(p_val, probs = .025),
-            p_q975 = quantile(p_val, probs = .975))
-  
-grouped_data$p_mean = -log10(grouped_data$p_mean) # convert p values
-grouped_data$p_q025 = -log10(grouped_data$p_q025) # convert p values
-grouped_data$p_q975 = -log10(grouped_data$p_q975) # convert p values
-
-pdf(paste(main_fig_dir,"p_val_VS_threshold_AS0.2_FGA0.2_abs.pdf",sep = ""),width=2, height=2.5)
-ggplot(grouped_data, aes(x = threshold, y = p_mean, color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
-  #geom_point() + 
-  geom_line(size=0.2) +
-  geom_ribbon(aes(ymin = p_q025, ymax = p_q975), alpha = 0.5, colour = NA) +
-  #geom_errorbar(aes(x = threshold, ymin = p_val_lower, ymax = p_val_upper), width = 0.04, data = grouped_data) +
-  #scale_color_discrete(name = "") + 
-  theme_bw()+
-  theme(legend.position= "none", #"none", c(0.8, 0.2)
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "-log10 (Wald P value)")
-dev.off()
-
-pdf(paste(main_fig_dir,"HR_VS_threshold_AS0.2_FGA0.2_abs.pdf",sep = ""),width=2, height=2.5)
-ggplot(grouped_data, aes(x = threshold, y = HR_mean,color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
-  #geom_point() + 
-  geom_line(size=0.2) +
-  geom_ribbon(aes(ymin = HR_q025, ymax = HR_q975), alpha = 0.5, colour = NA) +
-  #geom_errorbar(aes(x = threshold, ymin = HR_lower, ymax = HR_upper), width = 0.04, data = grouped_data) +
-  #scale_color_discrete(name = "") + 
-  theme_bw()+
-  theme(legend.position="none",
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "Threshold", y = "Hazard ratio")
-dev.off()
-
-```
-
-# binary AS and FGA scores based on optimal threshold
-```{r}
+########################## binary AS and FGA scores based on optimal threshold ########################## 
 
 common_columns = c('CancerType','TMB','Drug_class','FGA0.2','OS_Months','OS_Event')
 mskcc_df = rbind(samstein_df[common_columns],chowell_df[common_columns])
 
 samstein_df = samstein_df %>% group_by(CancerType) %>% mutate(
          AS0.1_score = ifelse(AS0.1 >= quantile(AS0.1, 0.5), "high", "low"),
-         AS0.15_score = ifelse(AS0.15 >= quantile(AS0.15, 0.5), "high", "low"),
          AS0.2_score = ifelse(AS0.2 >= quantile(AS0.2, 0.6), "high", "low"),
-         #AS0.2_score = ifelse(AS0.2 >= quantile(AS0.2, 0.5), "high", "low"),
          ASstar_score = ifelse(ASstar >= quantile(ASstar, 0.3), "high", "low"),
-         FGA0.1_score = ifelse(FGA0.1 >= quantile(FGA0.1, 0.5), "high", "low"),
-         FGA0.15_score = ifelse(FGA0.15 >= quantile(FGA0.15, 0.5), "high", "low"),
+         FGA0.1_score = ifelse(FGA0.1 >= quantile(FGA0.1, 0.4), "high", "low"),
          FGA0.2_score = ifelse(FGA0.2 >= quantile(FGA0.2, 0.5), "high", "low"),
-         FGAstar_score = ifelse(FGAstar >= quantile(FGAstar, 0.2), "high", "low"),
-         AS0.2_0.1 = ifelse(AS0.2 >= 0.1, "high", "low"),
-         FGA0.2_0.16 = ifelse(FGA0.2 >= 0.16, "high", "low"),
+         FGAstar_score = ifelse(FGAstar >= quantile(FGAstar, 0.2), "high", "low"))
          
-         )
 chowell_df = chowell_df %>% group_by(CancerType) %>% mutate(
-         FGA0.2_score = ifelse(FGA0.2 >= quantile(FGA0.2, 0.5), "high", "low"),
-         TMB_score = ifelse(TMB >= quantile(TMB, 0.8), "high", "low"),
-         TMB_10 = ifelse(TMB >= 10, "high", "low"),
-         FGA0.2_0.16 = ifelse(FGA0.2 >= 0.16, "high", "low"),)
-# combined Samstein and Chowell cohorts
-mskcc_df = mskcc_df %>% group_by(CancerType) %>% mutate(
-         FGA0.2_score = ifelse(FGA0.2 >= quantile(FGA0.2, 0.5), "high", "low"),
-         TMB_score = ifelse(TMB >= quantile(TMB, 0.8), "high", "low"),
-         TMB_10 = ifelse(TMB >= 10, "high", "low"),
-         FGA0.2_0.16 = ifelse(FGA0.2 >= 0.16, "high", "low"),)
+         FGA0.2_score = ifelse(FGA0.2 >= quantile(FGA0.2, 0.5), "high", "low"))
+
+score_columns = c('SampleID', 'AS0.1_score', 'AS0.2_score', 'ASstar_score', 'FGA0.1_score', 'FGA0.2_score', 'FGAstar_score')
+samstein_df0 = left_join(samstein_df0, samstein_df[score_columns], by = c("SAMPLE_ID" = "SampleID"))
+write.csv(samstein_df0,file = 'MSK_allInfo.csv',row.names = FALSE)
+
 ```
 
 
-# survival analysis for pan-cancer and individual cancer types using AS0.1 (Samstein et al. cohort)
+# Sfigure 1: AS0.1 survival analysis for pan-cancer and individual cancer types (Samstein et al. cohort)
 ```{r}
-stratify_var = 'AS' # AS or FGA or TMB
-aneuploidy_threshold = 0.1
+patients = 'low-TMB' # low-TMB all
+stratify_var = 'AS0.1' # AS or FGA or TMB
 
-stratifyVar_threshold = aneuploidy_threshold 
-data_plot = samstein_df[samstein_df$TMB_score=='low',]
-
-data_plot[[paste0(stratify_var,'_score')]] <- relevel(factor(data_plot[[paste0(stratify_var,stratifyVar_threshold,'_score')]]), ref = "low")
+if (patients == 'low-TMB'){
+  data_plot = samstein_df[samstein_df$TMB_score=='low',]
+}else if (patients == 'low-TMB'){
+  data_plot = samstein_df[samstein_df$TMB_score=='high',]
+}else{
+  data_plot = samstein_df
+}
+data_plot[[paste0(stratify_var,'_score')]] <- relevel(factor(data_plot[[paste0(stratify_var,'_score')]]), ref = "low")
 
 ##### OS
 cancerData=data.frame(data_plot[paste0(stratify_var,'_score')],data_plot$OS_Months,data_plot$OS_Event)
@@ -581,7 +459,7 @@ survp=ggsurvplot(
   conf.int = TRUE,          # Add confidence interval
   pval = FALSE,              # Add p-value
   #pval.coord = c(70*0.65, 0.55),
-  xlim = c(0,80),
+  #xlim = c(0,80),
   ylim=c(0,1),
   xlab = "Time in months",
   break.time.by = 10,
@@ -594,7 +472,7 @@ survp=ggsurvplot(
   tables.theme = theme_cleantable(),
   legend.labs =c(paste0(stratify_var," low"), paste0(stratify_var," high")),    # Change legend labels
   legend.title="",
-  legend = c(0.6, 0.9), # legend relative position
+  legend = c(10.6, 0.9), # legend relative position
   font.main = c(fontSize),
   font.caption = c(fontSize),
   font.legend = c(fontSize),
@@ -606,9 +484,9 @@ survp=ggsurvplot(
 )+
   guides(colour = guide_legend(nrow = 1)) # legend in rows
 survp$plot = survp$plot+ 
-              ggplot2::annotate("text", x=0, y=0.2, label=paste0('p',' = 0.00008', '\n', 'HR',' = ',round(HR_value,2),' (', round(HR_CI[1],2),'-',round(HR_CI[2],2),')'),size = 5,hjust = 0)
+              ggplot2::annotate("text", x=0, y=0.2, label=paste0('p = ',round(P_value,3), '\n', 'HR = ',round(HR_value,2),' (', round(HR_CI[1],2),'-',round(HR_CI[2],2),')'),size = 5,hjust = 0)
 
-cn_now = paste0('TMBL_', stratify_var,stratifyVar_threshold)
+cn_now = paste0(patients,'_', stratify_var)
 title_str = paste0('Samstein_PanCancer_OS_',cn_now)
 #png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
 pdf(paste(main_fig_dir,title_str,".pdf",sep = ""),width=4, height=3)
@@ -638,7 +516,7 @@ for (ct in cancerType_samstein){
     conf.int = TRUE,          # Add confidence interval
     pval = FALSE,              # Add p-value
     #pval.coord = c(70*0.65, 0.55),
-    xlim = c(0,80),
+    #xlim = c(0,80),
     ylim=c(0,1),
     xlab = "Time in months",
     break.time.by = 10,
@@ -663,66 +541,719 @@ for (ct in cancerType_samstein){
   )+ 
     guides(colour = guide_legend(nrow = 1)) # legend in rows
   survp$plot = survp$plot+ 
-              ggplot2::annotate("text", x=0, y=0.2, label=paste0('p',' = ',round(P_value,3), '\n', 'HR',' = ',round(HR_value,2),' (', round(HR_CI[1],2),'-',round(HR_CI[2],2),')'),size = 5, hjust = 0)
+              ggplot2::annotate("text", x=0, y=0.2, label=paste0('p = ',round(P_value,3), '\n', 'HR',' = ',round(HR_value,2),' (', round(HR_CI[1],2),'-',round(HR_CI[2],2),')'),size = 5, hjust = 0)
   title_str = paste0('Samstein_',ct,'_OS_',cn_now)
   #png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
   pdf(paste(main_fig_dir,title_str,".pdf",sep = ""),width=4, height=3)
   print(survp, newpage = FALSE)
   dev.off()
 }
+
 ```
 
-# Multivariable hazard ratio Forest plot for AS0.1 (Binary, percentile threshold)
+
+# Figure 2b: Pan-cancer K-M survival curves
 ```{r}
-cancerType_list = cancerType_samstein
 
-data_for_HR = samstein_df
-data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
-data_for_HR$AS0.1_score <- relevel(factor(data_for_HR$AS0.1_score), ref = "low")
-HR_pancancer = data.frame()
-model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS0.1_score` + `Drug_class`, data = data_for_HR) 
-HR_ct = exp(model$coefficients[['AS0.1_scorehigh']])
-HR_ct_025 = exp(confint(model))['AS0.1_scorehigh',1]
-HR_ct_975 = exp(confint(model))['AS0.1_scorehigh',2]
-p_ct = summary(model)$coefficients['AS0.1_scorehigh',5]
-HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-HR_pancancer = rbind(HR_pancancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = 'All'))
-colnames(HR_pancancer) = c('HR_AS0.1','HR_AS0.1025','HR_AS0.1975','p-val_AS0.1','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_pancancer['CANCER_TYPE'] = rownames(HR_pancancer)
-HR_each_cancer = data.frame()
-for (ct in cancerType_list){
-  model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS0.1_score` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
-  HR_ct = exp(model$coefficients[['AS0.1_scorehigh']])
-  HR_ct_025 = exp(confint(model))['AS0.1_scorehigh',1]
-  HR_ct_975 = exp(confint(model))['AS0.1_scorehigh',2]
-  p_ct = summary(model)$coefficients['AS0.1_scorehigh',5]
-  HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-  HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-  HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-  p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = ct))
+########################## AS0.1 ########################## 
+
+quantile_plot <- samstein_df %>%
+  group_by(CancerType) %>% 
+      mutate(AS_as_group = paste0(AS0.1_score, " AS0.1, ", TMB_score, " TMB"))
+quantile_plot$AS_as_group2 <- factor(quantile_plot$AS_as_group, levels = c("low AS0.1, high TMB", "high AS0.1, high TMB", "low AS0.1, low TMB", "high AS0.1, low TMB"))
+
+pdf(paste0(main_fig_dir,"PanCan_KM_AS0.1-TMB.pdf"), width = 4, height = 4, onefile = F)
+ggsurvplot(survfit(Surv(OS_Months, OS_Event) ~ AS_as_group2, data = quantile_plot), pval = F, risk.table = F,
+           palette = c("#9B2226", "#CA6702", "#005F73","#001219"),
+           risk.table.height = 0.3,
+           legend.labs = c("AS-L/TMB-H", "AS-H/TMB-H", "AS-L/TMB-L", "AS-H/TMB-L"),
+           legend.title="",
+           legend = c(0.4, 0.9), # legend relative position
+           pval.method = T, tables.y.text = F,
+           xlab = "Time (months)") +
+  guides(color=guide_legend(ncol = 1)) +
+  labs(color = "")
+dev.off()
+
+quantile_plot_temp = quantile_plot[quantile_plot$AS_as_group=='high AS0.1, low TMB' | quantile_plot$AS_as_group=='low AS0.1, low TMB', ]
+quantile_plot_temp$AS_as_group <- relevel(factor(quantile_plot_temp$AS_as_group), ref = "low AS0.1, low TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~AS_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('AS0.1H/L in TMB-low', round(HR_value,2), round(P_value,5)))
+
+quantile_plot_temp = quantile_plot[quantile_plot$AS_as_group=='high AS0.1, high TMB' | quantile_plot$AS_as_group=='low AS0.1, high TMB', ]
+quantile_plot_temp$AS_as_group <- relevel(factor(quantile_plot_temp$AS_as_group), ref = "low AS0.1, high TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~AS_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('AS0.1H/L in TMB-high', round(HR_value,2), round(P_value,5)))
+
+
+########################## FGA0.1 ########################## 
+
+quantile_plot <- samstein_df %>%
+  group_by(CancerType) %>% 
+      mutate(FGA_as_group = paste0(FGA0.1_score, " FGA0.1, ", TMB_score, " TMB"))
+quantile_plot$FGA_as_group2 <- factor(quantile_plot$FGA_as_group, levels = c("low FGA0.1, high TMB", "high FGA0.1, high TMB", "low FGA0.1, low TMB", "high FGA0.1, low TMB"))
+
+pdf(paste0(main_fig_dir,"PanCan_KM_FGA0.1-TMB.pdf"), width = 4, height = 4, onefile = F)
+ggsurvplot(survfit(Surv(OS_Months, OS_Event) ~ FGA_as_group2, data = quantile_plot), pval = F, risk.table = F,
+           palette = c("#9B2226", "#CA6702", "#005F73","#001219"),
+           risk.table.height = 0.3,
+           legend.labs = c("FGA-L/TMB-H", "FGA-H/TMB-H", "FGA-L/TMB-L", "FGA-H/TMB-L"),
+           legend.title="",
+           legend = c(0.4, 0.9), # legend relative position
+           pval.method = T, tables.y.text = F,
+           xlab = "Time (months)") +
+  guides(color=guide_legend(ncol = 1)) +
+  labs(color = "")
+dev.off()
+
+quantile_plot_temp = quantile_plot[quantile_plot$FGA_as_group=='high FGA0.1, low TMB' | quantile_plot$FGA_as_group=='low FGA0.1, low TMB', ]
+quantile_plot_temp$FGA_as_group <- relevel(factor(quantile_plot_temp$FGA_as_group), ref = "low FGA0.1, low TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~FGA_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('FGA0.1H/L in TMB-low', round(HR_value,2), round(P_value,5)))
+
+quantile_plot_temp = quantile_plot[quantile_plot$FGA_as_group=='high FGA0.1, high TMB' | quantile_plot$FGA_as_group=='low FGA0.1, high TMB', ]
+quantile_plot_temp$FGA_as_group <- relevel(factor(quantile_plot_temp$FGA_as_group), ref = "low FGA0.1, high TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~FGA_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('FGA0.1H/L in TMB-high', round(HR_value,2), round(P_value,5)))
+
+
+########################## AS0.2 ########################## 
+
+quantile_plot <- samstein_df %>%
+  group_by(CancerType) %>% 
+      mutate(AS_as_group = paste0(AS0.2_score, " AS0.2, ", TMB_score, " TMB"))
+quantile_plot$AS_as_group2 <- factor(quantile_plot$AS_as_group, levels = c("low AS0.2, high TMB", "high AS0.2, high TMB", "low AS0.2, low TMB", "high AS0.2, low TMB"))
+
+pdf(paste0(main_fig_dir,"PanCan_KM_AS0.2-TMB.pdf"), width = 4, height = 4, onefile = F)
+ggsurvplot(survfit(Surv(OS_Months, OS_Event) ~ AS_as_group2, data = quantile_plot), pval = F, risk.table = F,
+           palette = c("#9B2226", "#CA6702", "#005F73","#001219"),
+           risk.table.height = 0.3,
+           legend.labs = c("AS-L/TMB-H", "AS-H/TMB-H", "AS-L/TMB-L", "AS-H/TMB-L"),
+           legend.title="",
+           legend = c(0.4, 0.9), # legend relative position
+           pval.method = T, tables.y.text = F,
+           xlab = "Time (months)") +
+  guides(color=guide_legend(ncol = 1)) +
+  labs(color = "")
+dev.off()
+
+quantile_plot_temp = quantile_plot[quantile_plot$AS_as_group=='high AS0.2, low TMB' | quantile_plot$AS_as_group=='low AS0.2, low TMB', ]
+quantile_plot_temp$AS_as_group <- relevel(factor(quantile_plot_temp$AS_as_group), ref = "low AS0.2, low TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~AS_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('AS0.2H/L in TMB-low', round(HR_value,2), round(P_value,5)))
+
+quantile_plot_temp = quantile_plot[quantile_plot$AS_as_group=='high AS0.2, high TMB' | quantile_plot$AS_as_group=='low AS0.2, high TMB', ]
+quantile_plot_temp$AS_as_group <- relevel(factor(quantile_plot_temp$AS_as_group), ref = "low AS0.2, high TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~AS_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('AS0.2H/L in TMB-high', round(HR_value,2), round(P_value,5)))
+
+
+########################## FGA0.2 ########################## 
+
+quantile_plot <- samstein_df %>%
+  group_by(CancerType) %>% 
+      mutate(FGA_as_group = paste0(FGA0.2_score, " FGA0.2, ", TMB_score, " TMB"))
+quantile_plot$FGA_as_group2 <- factor(quantile_plot$FGA_as_group, levels = c("low FGA0.2, high TMB", "high FGA0.2, high TMB", "low FGA0.2, low TMB", "high FGA0.2, low TMB"))
+
+pdf(paste0(main_fig_dir,"PanCan_KM_FGA0.2-TMB.pdf"), width = 4, height = 4, onefile = F)
+ggsurvplot(survfit(Surv(OS_Months, OS_Event) ~ FGA_as_group2, data = quantile_plot), pval = F, risk.table = F,
+           palette = c("#9B2226", "#CA6702", "#005F73","#001219"),
+           risk.table.height = 0.3,
+           legend.labs = c("FGA-L/TMB-H", "FGA-H/TMB-H", "FGA-L/TMB-L", "FGA-H/TMB-L"),
+           legend.title="",
+           legend = c(0.4, 0.9), # legend relative position
+           pval.method = T, tables.y.text = F,
+           xlab = "Time (months)") +
+  guides(color=guide_legend(ncol = 1)) +
+  labs(color = "")
+dev.off()
+
+quantile_plot_temp = quantile_plot[quantile_plot$FGA_as_group=='high FGA0.2, low TMB' | quantile_plot$FGA_as_group=='low FGA0.2, low TMB', ]
+quantile_plot_temp$FGA_as_group <- relevel(factor(quantile_plot_temp$FGA_as_group), ref = "low FGA0.2, low TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~FGA_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('FGA0.2H/L in TMB-low', round(HR_value,2), round(P_value,5)))
+
+quantile_plot_temp = quantile_plot[quantile_plot$FGA_as_group=='high FGA0.2, high TMB' | quantile_plot$FGA_as_group=='low FGA0.2, high TMB', ]
+quantile_plot_temp$FGA_as_group <- relevel(factor(quantile_plot_temp$FGA_as_group), ref = "low FGA0.2, high TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~FGA_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('FGA0.2H/L in TMB-high', round(HR_value,2), round(P_value,5)))
+
+
+
+########################## FGA0.2 on Chowell et al cohort ########################## 
+
+quantile_plot <- chowell_df %>%
+  group_by(CancerType) %>% 
+      mutate(FGA_as_group = paste0(FGA0.2_score, " FGA0.2, ", TMB_score, " TMB"))
+quantile_plot$FGA_as_group2 <- factor(quantile_plot$FGA_as_group, levels = c("low FGA0.2, high TMB", "high FGA0.2, high TMB", "low FGA0.2, low TMB", "high FGA0.2, low TMB"))
+
+pdf(paste0(main_fig_dir,"PanCan_KM_FGA0.2-TMB_Chowell.pdf"), width = 4, height = 4, onefile = F)
+ggsurvplot(survfit(Surv(OS_Months, OS_Event) ~ FGA_as_group2, data = quantile_plot), pval = F, risk.table = F,
+           palette = c("#9B2226", "#CA6702", "#005F73","#001219"),
+           risk.table.height = 0.3,
+           legend.labs = c("FGA-L/TMB-H", "FGA-H/TMB-H", "FGA-L/TMB-L", "FGA-H/TMB-L"),
+           legend.title="",
+           legend = c(0.4, 0.9), # legend relative position
+           pval.method = T, tables.y.text = F,
+           xlab = "Time (months)") +
+  guides(color=guide_legend(ncol = 1)) +
+  labs(color = "")
+dev.off()
+
+quantile_plot_temp = quantile_plot[quantile_plot$FGA_as_group=='high FGA0.2, low TMB' | quantile_plot$FGA_as_group=='low FGA0.2, low TMB', ]
+quantile_plot_temp$FGA_as_group <- relevel(factor(quantile_plot_temp$FGA_as_group), ref = "low FGA0.2, low TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~FGA_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('FGA0.2H/L in TMB-low', round(HR_value,2), round(P_value,5)))
+
+quantile_plot_temp = quantile_plot[quantile_plot$FGA_as_group=='high FGA0.2, high TMB' | quantile_plot$FGA_as_group=='low FGA0.2, high TMB', ]
+quantile_plot_temp$FGA_as_group <- relevel(factor(quantile_plot_temp$FGA_as_group), ref = "low FGA0.2, high TMB")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~FGA_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('FGA0.2H/L in TMB-high', round(HR_value,2), round(P_value,5)))
+
+
+########################## AS0.2 VS SA0.1 ########################## 
+
+quantile_plot <- samstein_df %>%
+  group_by(CancerType) %>% 
+      mutate(AS_as_group = paste0(AS0.2_score, " AS0.2, ", AS0.1_score, " AS0.1"))
+quantile_plot$AS_as_group2 <- factor(quantile_plot$AS_as_group, levels = c("low AS0.2, high AS0.1", "high AS0.2, high AS0.1", "low AS0.2, low AS0.1", "high AS0.2, low AS0.1"))
+
+pdf(paste0(main_fig_dir,"PanCan_KM_AS0.2-AS0.1.pdf"), width = 4, height = 4, onefile = F)
+ggsurvplot(survfit(Surv(OS_Months, OS_Event) ~ AS_as_group2, data = quantile_plot), pval = F, risk.table = F,
+           palette = c("#9B2226", "#CA6702", "#005F73","#001219"),
+           risk.table.height = 0.3,
+           legend.labs = c("AS0.2-L/AS0.1-H", "AS0.2-H/AS0.1-H", "AS0.2-L/AS0.1-L", "AS0.2-H/AS0.1-L"),
+           legend.title="",
+           legend = c(0.4, 0.9), # legend relative position
+           pval.method = T, tables.y.text = F,
+           xlab = "Time (months)") +
+  guides(color=guide_legend(ncol = 1)) +
+  labs(color = "")
+dev.off()
+
+quantile_plot_temp = quantile_plot[quantile_plot$AS_as_group=='high AS0.2, low AS0.1' | quantile_plot$AS_as_group=='low AS0.2, low AS0.1', ]
+quantile_plot_temp$AS_as_group <- relevel(factor(quantile_plot_temp$AS_as_group), ref = "low AS0.2, low AS0.1")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~AS_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('AS0.2H/L in AS0.1-low', round(HR_value,2), round(P_value,5)))
+
+quantile_plot_temp = quantile_plot[quantile_plot$AS_as_group=='high AS0.2, high AS0.1' | quantile_plot$AS_as_group=='high AS0.2, low AS0.1', ]
+quantile_plot_temp$AS_as_group <- relevel(factor(quantile_plot_temp$AS_as_group), ref = "high AS0.2, high AS0.1")
+scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~AS_as_group, data=quantile_plot_temp)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+print(c('AS0.2H/L in AS0.1-high', round(HR_value,2), round(P_value,5)))
+
+```
+
+# SFigure 2. Compare tumor purity of AS0.1/AS0.2 groups
+```{r}
+
+quantile_plot <- samstein_df %>%
+  group_by(CancerType) %>% 
+      mutate(AS_as_group = paste0(AS0.2_score, " AS0.2, ", AS0.1_score, " AS0.1"))
+quantile_plot$AS_as_group2 <- factor(quantile_plot$AS_as_group, levels = c("low AS0.2, high AS0.1", "high AS0.2, high AS0.1", "low AS0.2, low AS0.1", "high AS0.2, low AS0.1"))
+
+# Plot violin plot with boxplot inside
+ggplot(quantile_plot, aes(x = AS_as_group2, y = TumorPurity, fill = AS_as_group2)) +
+  geom_violin() +
+  geom_boxplot(width = 0.2, fill = "white", colour = "black") +
+  labs(title="", x = "Group", y = "Tumor purity (%)") +
+  scale_fill_manual(values = cols) +
+  theme_bw() +
+  theme(legend.position= "none",
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        # Change axis line
+        axis.text.x = element_text(angle = 45, hjust = 1, color="black"),
+        axis.line = element_line(colour = "black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks = element_line(color = "black"))
+ggsave(paste0(main_fig_dir,paste0("Samstein_AS01_AS0.2_diff_tumorPurity.pdf")), width = 6*0.5, height = 4*0.7)
+
+# Perform Mann-Whitney U test
+result <- wilcox.test(as.vector(quantile_plot[quantile_plot$AS_as_group2 == "low AS0.2, high AS0.1","TumorPurity"])[[1]], as.vector(quantile_plot[quantile_plot$AS_as_group2 == "high AS0.2, high AS0.1","TumorPurity"])[[1]], na.action = na.omit)
+
+result <- wilcox.test(as.vector(quantile_plot[quantile_plot$AS_as_group2 == "low AS0.2, low AS0.1","TumorPurity"])[[1]], as.vector(quantile_plot[quantile_plot$AS_as_group2 == "high AS0.2, low AS0.1","TumorPurity"])[[1]], na.action = na.omit)
+
+result <- wilcox.test(as.vector(quantile_plot[quantile_plot$AS_as_group2 == "low AS0.2, high AS0.1","TumorPurity"])[[1]], as.vector(quantile_plot[quantile_plot$AS_as_group2 == "low AS0.2, low AS0.1","TumorPurity"])[[1]], na.action = na.omit)
+
+result <- wilcox.test(as.vector(quantile_plot[quantile_plot$AS_as_group2 == "high AS0.2, high AS0.1","TumorPurity"])[[1]], as.vector(quantile_plot[quantile_plot$AS_as_group2 == "high AS0.2, low AS0.1","TumorPurity"])[[1]], na.action = na.omit)
+
+```
+
+
+# Figure 3: Hazard ratio Forest plot 
+```{r}
+dataset = 'Chowell' # Samstein Chowell
+survival_type = 'OS' # 
+HR_type = 'Uni' # Multi Uni
+Var_type = 'binary' # continuous  binary
+testVAR = 'FGA0.2' # AS0.2 FGA0.2  ASstar  FGAstar
+if (Var_type == 'binary'){
+  testVAR = paste0(testVAR, '_score')
 }
-colnames(HR_each_cancer) = c('HR_AS0.1','HR_AS0.1025','HR_AS0.1975','p-val_AS0.1','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
-HR_each_cancer = HR_each_cancer %>% arrange(HR_AS0.1)
-HR_each_cancer = rbind(HR_pancancer,HR_each_cancer)
-cancerOrder = HR_each_cancer$CANCER_TYPE
+testVAR_HR = testVAR
+if (grepl("binary", Var_type)){
+  testVAR_HR = paste0(testVAR,'high')
+}
+if (HR_type == 'Multi'){
+  if (Var_type == 'continuous'){
+    var_names = c(testVAR,'Drug_class', 'TMB')
+  }else{
+    var_names = c(testVAR,'Drug_class', 'TMB_score')
+  }
+}else{
+  var_names = c(testVAR)
+}
 
-HR_each_cancer$CANCER_TYPE <- factor(HR_each_cancer$CANCER_TYPE, levels = cancerOrder)
-ggplot(HR_each_cancer, aes(x = HR_each_cancer[['HR_AS0.1']], y = HR_each_cancer[['CANCER_TYPE']])) + # rep(9:1)
-  geom_point(size = 2) +
-  geom_errorbar(aes(xmin = HR_each_cancer[['HR_AS0.1025']], xmax = HR_each_cancer[['HR_AS0.1975']]))+
-  theme(legend.position = "none") +
-  geom_vline(xintercept=1,linetype=3)+
+HR_pancancer = data.frame()
+cancerType = 'All'
+if (dataset=='Samstein'){
+  data_for_HR = samstein_df # samstein_df chowell_df
+  cancerType_list = cancerType_samstein
+}else{
+  data_for_HR = chowell_df # samstein_df chowell_df
+  cancerType_list = cancerType_chowell
+}
+
+data_for_HR[[testVAR]] <- relevel(factor(data_for_HR[[testVAR]]), ref = "low")
+formula_obj <- as.formula(paste(paste0("Surv(",survival_type,"_Months, ",survival_type,"_Event) ~"), paste(var_names, collapse = " + ")))
+model = coxph(formula_obj, data = data_for_HR)
+
+HR_ct = exp(model$coefficients[[testVAR_HR]])
+HR_ct_025 = exp(confint(model))[testVAR_HR,1]
+HR_ct_975 = exp(confint(model))[testVAR_HR,2]
+p_ct = summary(model)$coefficients[testVAR_HR,5]
+
+HR_pancancer = rbind(HR_pancancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,dim(data_for_HR)[1],cancerType))
+colnames(HR_pancancer) = c(paste0('HR_',testVAR),paste0('HR_',testVAR,'025'),paste0('HR_',testVAR,'975'),paste0('p-val_',testVAR),'No. of patients', 'CancerType')
+
+HR_each_cancer = data.frame()
+
+for (ct in cancerType_list){
+  cancerType = ct
+  model = coxph(formula_obj, data = data_for_HR[data_for_HR$CancerType==ct,])
+  HR_ct = exp(model$coefficients[[testVAR_HR]])
+  HR_ct_025 = exp(confint(model))[testVAR_HR,1]
+  HR_ct_975 = exp(confint(model))[testVAR_HR,2]
+  p_ct = summary(model)$coefficients[testVAR_HR,5]
+  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,dim(data_for_HR[data_for_HR$CancerType==ct,])[1],cancerType))
+}
+colnames(HR_each_cancer) = c(paste0('HR_',testVAR),paste0('HR_',testVAR,'025'),paste0('HR_',testVAR,'975'),paste0('p-val_',testVAR),'No. of patients', 'CancerType')
+
+if (length(var_names)==1){
+  #if (var_names=='AS0.2_score'){ # FGA0.2_score
+  command_str <- paste0("HR_each_cancer = arrange(HR_each_cancer, desc(HR_",testVAR,"))") # desc(is.na(HR_",testVAR,")),
+  eval(parse(text = command_str))
+  cancerOrder = HR_each_cancer$CancerType
+  #}
+}else{
+    HR_each_cancer <- HR_each_cancer[order(match(HR_each_cancer$CancerType, cancerOrder)), ]
+}
+
+HR_each_cancer = rbind(HR_each_cancer,HR_pancancer)
+
+
+plot_data <- tibble::tibble(mean  = HR_each_cancer[[paste0('HR_',testVAR)]],
+                            lower = HR_each_cancer[[paste0('HR_',testVAR,'025')]],
+                            upper = HR_each_cancer[[paste0('HR_',testVAR,'975')]],
+                            cancer = HR_each_cancer$CancerType,
+                            pval = HR_each_cancer[[paste0('p-val_',testVAR)]],
+                            OR = round(HR_each_cancer[[paste0('HR_',testVAR)]], 2),
+                            size = HR_each_cancer$`No. of patients`)
+
+options(scipen = 999)
+P_value_raw = c(plot_data[['pval']], HR_pancancer[[paste0('p-val_',testVAR)]])
+
+
+pval_vec = vector("character", length(P_value_raw))
+for (i in 1:length(P_value_raw)){
+  pval = P_value_raw[i]
+  if (pval>=0.1){
+    pval_vec[i] = as.character(round(pval,2))
+  }else if (pval>=0.001){
+    pval_vec[i] = as.character(round(pval,3))
+  }else if (pval>=0.0001){
+    pval_vec[i] = as.character(round(pval,4))
+  }else{
+    pval_vec[i] = '<0.0001'
+  }
+}
+
+plot_data$pval = pval_vec[1:length(pval_vec)-1]
+
+xmin_lim = 0
+xmax_lim = 3
+breaks_x = c(0,1,2,3)
+
+labels_x = breaks_x
+
+
+fontSize = 1.2
+
+pdf_file <- paste0(main_fig_dir,paste0("Forest_",dataset,'_',survival_type,"_",HR_type,"_",Var_type,"_",testVAR,".pdf"))
+fig_width = 6.5
+if (dataset=='Samstein'){
+  fig_height = 4.5 #*1.4
+}else{
+  fig_height = 4.5 *1.4
+}
+pdf(pdf_file, onefile=FALSE, width = fig_width,height=fig_height)
+
+if (length(var_names)==1){
+  if (grepl("AS", testVAR)){
+    if (grepl("star", testVAR)){
+      xlabel = expression("Kaplan-Meier HR for AS"[EP])
+    }else{
+      xlabel = expression("Kaplan-Meier HR for AS"[0.2])
+    }
+  }else{
+    if (grepl("star", testVAR)){
+      xlabel = expression("Kaplan-Meier HR for FGA"[EP])
+    }else{
+      xlabel = expression("Kaplan-Meier HR for FGA"[0.2])
+    }
+  }
+}else{
+  if (grepl("AS", testVAR)){
+    if (grepl("star", testVAR)){
+      xlabel = expression("Multivariable HR for AS"[EP])
+    }else{
+      xlabel = expression("Multivariable HR for AS"[0.2])
+    }
+  }else{
+    if (grepl("star", testVAR)){
+      xlabel = expression("Multivariable HR for FGA"[EP])
+    }else{
+      xlabel = expression("Multivariable HR for FGA"[0.2])
+    }
+  }
+}
+
+plot_data %>%
+  forestplot(labeltext = c("cancer", "size", "pval"),
+             graph.pos = 3,
+             boxsize = 0.35,
+             #line.margin = .30, # We need to add this to avoid crowding
+             vertices = TRUE,
+             clip = c(xmin_lim, xmax_lim),
+             xlog = FALSE,
+             zero = 1,
+             #txt_gp = fpTxtGp(cex=0.75),
+             txt_gp = fpTxtGp(ticks=gpar(cex=fontSize),xlab=gpar(cex=fontSize),label=gpar(cex=fontSize),legend=gpar(cex=fontSize),title=gpar(cex=fontSize)), # label, summary, xlab, title, ticks legend
+             xlab = xlabel, # Kaplan-Meier   Multivariable
+             xticks = breaks_x,
+             #lineheight=unit(1,'cm'),
+             graphwidth = unit(3, "cm"),
+             lineheight = unit(2, "cm")
+             ) %>%
+  fp_set_style(box = "black",
+               line = "black",
+               summary = "black") %>%
+  fp_add_header(cancer = c("Cancer type")|> fp_txt_plain() |> fp_align_center(),
+                size = c("Samples")|> fp_txt_plain() |> fp_align_center(), # "No. of patients"
+                pval = c("P-value")|> fp_txt_plain() |> fp_align_center())
+
+dev.off()
+
+
+```
+
+
+# Supplementary Table 1. sample size estimation for certain stat. power
+```{r}
+
+samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
+         FGA0.2_score = ifelse(FGA0.2 >= quantile(FGA0.2, 0.5), "E", "C"), # , "high", "low"
+         AS0.2_score = ifelse(AS0.2 >= quantile(AS0.2, 0.6), "E", "C"), # , "high", "low"
+         )
+data_for_HR = samstein_df_temp
+
+# chowell_df_temp = chowell_df %>% group_by(CancerType) %>% mutate(
+#          FGA0.2_score = ifelse(FGA0.2 >= quantile(FGA0.2, 0.5), "E", "C"), # , "high", "low"
+#          )
+# data_for_HR = chowell_df_temp
+
+size_n_each_cancer = data.frame()
+for (ct in cancerType_samstein){  # cancerType_samstein  cancerType_chowell
+  model = coxph(Surv(OS_Months, OS_Event) ~ `FGA0.2_score`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
+  HR_ct = exp(model$coefficients[['FGA0.2_scoreE']])
+  p_ct = summary(model)$coefficients['FGA0.2_scoreE',5]
+  
+  if ((HR_ct > 1) & (p_ct >= 0.05)){
+    size_n = ssizeCT(Surv(OS_Months, OS_Event) ~ `FGA0.2_score`,
+                    dat = data_for_HR[data_for_HR$CancerType==ct,],
+                    power = 0.8, #  power to detect the magnitude of the hazard ratio as small as that specified by RR.
+                    k = 1, # ratio of participants in group E (experimental group) compared to group C (control group).
+                    RR = HR_ct, # postulated hazard ratio.
+                    alpha = 0.05) # type I error rate.
+    print(paste(ct, ':', round(HR_ct,2), round(p_ct,4), dim(data_for_HR[data_for_HR$CancerType==ct,])[1], sum(size_n$ssize)))
+    size_n_each_cancer = rbind(size_n_each_cancer,data.frame(HR_ct,p_ct,dim(data_for_HR[data_for_HR$CancerType==ct,])[1],sum(size_n$ssize),row.names = ct))
+  }
+}
+write.csv(size_n_each_cancer, 'size_n_each_cancer.csv')
+
+```
+
+# SFigure 4. Comparison of bladder cancer between two cohorts
+```{r}
+
+bladder_samstein_df = samstein_df[samstein_df$CancerType=="Bladder cancer", c("TMB", "Age", "Sex", "FGA0.2", "FGA0.2_score", "TMB_score", "OS_Months", "OS_Event")]
+bladder_samstein_df$Sex <- ifelse(bladder_samstein_df$Sex == "Male", 1, 0)
+
+bladder_chowell_df = chowell_df[chowell_df$CancerType=="Bladder cancer", c("TMB", "Age", "Sex", "FGA0.2", "FGA0.2_score", "TMB_score", "OS_Months", "OS_Event")]
+
+# Add a column to each data frame indicating its origin
+bladder_samstein_df$origin <- 'Samstein'
+bladder_chowell_df$origin <- 'Chowell'
+# Merge the data frames using bind_rows()
+merged_bladder <- bind_rows(bladder_samstein_df, bladder_chowell_df)
+
+# Plot violin plot with boxplot inside
+ggplot(merged_bladder, aes(x = origin, y = FGA0.2, fill = origin)) +
+  geom_violin() +
+  geom_boxplot(width = 0.2, fill = "white", colour = "black") +
+  labs(title="", x = "", y = expression('FGA'[0.2])) +
+  scale_fill_manual(values = cols) +
+  theme_bw() +
+  theme(legend.position= "none",
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        # Change axis line
+        axis.text.x = element_text(angle = 45, hjust = 1, color="black"),
+        axis.line = element_line(colour = "black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks = element_line(color = "black"))
+ggsave(paste0(main_fig_dir,paste0("Comparison_bladder_FGA0.2.pdf")), width = 6*0.3, height = 4*0.6)
+
+# Perform Mann-Whitney U test
+result <- wilcox.test(as.vector(merged_bladder[merged_bladder$origin == "Samstein", "FGA0.2"])[[1]], as.vector(merged_bladder[merged_bladder$origin == "Chowell","FGA0.2"])[[1]], na.action = na.omit)
+
+
+
+##### OS
+data_plot = merged_bladder
+cancerData=data.frame(data_plot$origin,data_plot$OS_Months,data_plot$OS_Event)
+colnames(cancerData) = c("Score", "OS_Months", "OS_Event")
+sfit = survfit(Surv(data_plot$OS_Months,data_plot$OS_Event) ~ Score, data=cancerData)
+scox = coxph(Surv(data_plot$OS_Months,data_plot$OS_Event)~Score, data=cancerData)
+scox_coef = summary(scox)$coefficients
+HR_value = scox_coef[2] # hazard ratio
+Z_value=scox_coef[4]
+P_value=scox_coef[5]
+HR_CI = exp(confint(scox))
+print(paste(c('OS', 'Bladder', round(P_value,5), round(HR_value,2)), collapse= " "))
+##### plot
+fontSize = 13
+survp=ggsurvplot(
+  sfit,
+  data = cancerData,
+  size = 1,                 # change line size
+  palette =
+    c("#E7B800", "#2E9FDF"),# custom color palettes
+  conf.int = TRUE,          # Add confidence interval
+  pval = FALSE,              # Add p-value
+  #pval.coord = c(70*0.65, 0.55),
+  #xlim = c(0,80),
+  ylim=c(0,1),
+  xlab = "Time in months",
+  break.time.by = 10,
+  risk.table=TRUE,
+  risk.table.height = 0.29, # Useful to change when you have multiple groups
+  risk.table.pos="out",
+  risk.table.col="black",
+  risk.table.y.text = FALSE,
+  tables.y.text = FALSE, 
+  tables.theme = theme_cleantable(),
+  legend.labs =c('Chowell et al.', 'Samstein et al.'),    # Change legend labels
+  legend.title="",
+  #legend = c(0.6, 0.9), # legend relative position
+  font.main = c(fontSize),
+  font.caption = c(fontSize),
+  font.legend = c(fontSize),
+  font.tickslab = c(fontSize),
+  font.x = c(fontSize),
+  font.y = c(fontSize),
+  #ggtheme = theme_classic2(base_size=fontSize, base_family = "Arial"),
+  #font.family = "Arial"
+)+
+  guides(colour = guide_legend(nrow = 1)) # legend in rows
+survp$plot = survp$plot+ 
+              ggplot2::annotate("text", x=0, y=0.2, label=paste0('p = ',round(P_value,3), '\n', 'HR = ',round(HR_value,2),' (', round(HR_CI[1],2),'-',round(HR_CI[2],2),')'),size = 5,hjust = 0)
+
+title_str = 'Comparison_bladder_KM'
+#png(file=paste(main_fig_dir,title_str,".png",sep = ""),res=300,width=1100, height=900) # width=600, height=350
+pdf(paste(main_fig_dir,title_str,".pdf",sep = ""),width=4, height=4)
+print(survp, newpage = FALSE)
+dev.off()
+
+```
+
+
+# Figure 4b: distribution of the cutoff for individual cancers
+```{r}
+
+cols <- cols0[2:11]
+
+elbowPts_cancers <- read.table("CNAcutoff_elbow_result.txt", sep="\t", header=TRUE)
+elbowPts_cancers$CancerType = str_to_sentence(tolower(elbowPts_cancers$CancerType))
+elbowPts_cancers_ordered <- elbowPts_cancers[order(elbowPts_cancers$EP_AS), ]
+elbowPts_cancers_ordered$CancerType <- factor(elbowPts_cancers_ordered$CancerType, levels = unique(elbowPts_cancers_ordered$CancerType), ordered = TRUE)
+
+
+x_levels <- factor(elbowPts_cancers_ordered$CancerType, levels = unique(elbowPts_cancers_ordered$CancerType))
+
+# create the plot
+ggplot(elbowPts_cancers_ordered, aes(x=x_levels, y=EP_AS)) +
+  geom_bar(stat="identity", fill=cols, colour="black", width=0.5) +
+  geom_errorbar(aes(ymin=EP_AS_low, ymax=EP_AS_up), width=0.2, colour="black") +
+  labs(title="", x="Cancer type", y="Elbow point (AS)") +
+  theme_bw() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        # Change axis line
+        axis.text.x = element_text(angle = 45, hjust = 1, color="black"),
+        axis.line = element_line(colour = "black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks = element_line(color = "black")) +
+  #ylim(c(0,0.5))+
+  scale_y_continuous(expand=c(0,0))
+ggsave(paste0(main_fig_dir,paste0("Samstein_elbowPts_AS_cutoff.pdf")), width = 6*0.5, height = 4*0.7, plot = last_plot() + theme(plot.margin = unit(c(0, 0, 0, 0.5), "cm"))) # top, right, bottom, and left.
+
+ggplot(elbowPts_cancers_ordered, aes(x=x_levels, y=EP_FGA)) +
+  geom_bar(stat="identity", fill=cols, colour="black", width=0.5) +
+  geom_errorbar(aes(ymin=EP_FGA_low, ymax=EP_FGA_up), width=0.2, colour="black") +
+  labs(title="", x="Cancer type", y="Elbow point (FGA)") +
+  theme_bw() +
+  theme(panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        # Change axis line
+        axis.text.x = element_text(angle = 45, hjust = 1, color="black"),
+        axis.line = element_line(colour = "black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks = element_line(color = "black")) +
+  #ylim(c(0,0.5))+
+  scale_y_continuous(expand=c(0,0))
+ggsave(paste0(main_fig_dir,paste0("Samstein_elbowPts_FGA_cutoff.pdf")), width = 6*0.7, height = 4*0.7, plot = last_plot() + theme(plot.margin = unit(c(0, 0, 0, 0.5), "cm"))) # top, right, bottom, and left.
+
+
+```
+
+# SFigure 5. optimal binarize thresholds for AS_EP and FGA_EP
+```{r}
+
+HR_diffCutoff00 = data.frame()
+for (quant_cutoff in seq(0.1, 0.9, by=0.1)){
+  samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
+         FGA_score = ifelse(FGAstar >= quantile(FGAstar, quant_cutoff), "high", "low"),
+         )
+  data_for_HR = samstein_df_temp
+  data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
+  data_for_HR$FGA_score <- relevel(factor(data_for_HR$FGA_score), ref = "low")
+  for (i in 1:dim(data_for_HR)[1]){ # dim(data_for_HR)[1]
+    data_for_HR_leaveOneOut = data_for_HR[-c(i),]
+    model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
+    HR_ct = exp(model$coefficients[['FGA_scorehigh']])
+    p_ct = summary(model)$coefficients['FGA_scorehigh',5]
+    HR_diffCutoff00 = rbind(HR_diffCutoff00,data.frame(HR_ct,p_ct,quant_cutoff,'FGA0.1'))
+  }
+}
+colnames(HR_diffCutoff00) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
+
+HR_diffCutoff0 = data.frame()
+for (quant_cutoff in seq(0.1, 0.9, by=0.1)){
+  samstein_df_temp = samstein_df %>% group_by(CancerType) %>% mutate(
+         AS_score = ifelse(ASstar >= quantile(ASstar, quant_cutoff), "high", "low"),
+         )
+  data_for_HR = samstein_df_temp
+  data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
+  data_for_HR$AS_score <- relevel(factor(data_for_HR$AS_score), ref = "low")
+  for (i in 1:dim(data_for_HR)[1]){ # dim(data_for_HR)[1]
+    data_for_HR_leaveOneOut = data_for_HR[-c(i),]
+    model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR_leaveOneOut)
+    HR_ct = exp(model$coefficients[['AS_scorehigh']])
+    p_ct = summary(model)$coefficients['AS_scorehigh',5]
+    HR_diffCutoff0 = rbind(HR_diffCutoff0,data.frame(HR_ct,p_ct,quant_cutoff,'AS0.1'))
+  }
+}
+colnames(HR_diffCutoff0) = c('HR', 'p_val','threshold', 'CNV_calling_cutoff')
+
+HR_diffCutoff = rbind(HR_diffCutoff00, HR_diffCutoff0)
+
+grouped_data <- HR_diffCutoff %>% 
+  group_by(threshold, CNV_calling_cutoff) %>% 
+  summarize(HR_mean = mean(HR), 
+            #HR_sd_val = sd(HR), 
+            HR_q025 = quantile(HR, probs = .025),
+            HR_q975 = quantile(HR, probs = .975),
+            p_mean = mean(p_val), 
+            #p_sd_val = sd(p_val), 
+            p_q025 = quantile(p_val, probs = .025),
+            p_q975 = quantile(p_val, probs = .975))
+  
+grouped_data$p_mean = -log10(grouped_data$p_mean) # convert p values
+grouped_data$p_q025 = -log10(grouped_data$p_q025) # convert p values
+grouped_data$p_q975 = -log10(grouped_data$p_q975) # convert p values
+
+pdf(paste(main_fig_dir,"p_val_VS_threshold_ASep_FGAep.pdf",sep = ""),width=2, height=2.5) # width=2, height=2.5
+ggplot(grouped_data, aes(x = threshold, y = p_mean, color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
+  #geom_point() + 
+  geom_line(size=0.2) +
+  geom_ribbon(aes(ymin = p_q025, ymax = p_q975), alpha = 0.5, colour = NA) +
+  #geom_errorbar(aes(x = threshold, ymin = p_val_lower, ymax = p_val_upper), width = 0.04, data = grouped_data) +
+  #scale_color_discrete(name = "") + 
   theme_bw()+
-  theme(#axis.text.x=element_blank(),
-        #axis.ticks.x=element_blank(),
-        #axis.text.y=element_blank(),
-        #axis.ticks.y=element_blank(),
-        # Hide panel borders and remove grid lines
+  theme(legend.position= "none", #"none", c(0.8, 0.2)
         panel.border = element_blank(),
         panel.grid.major = element_blank(),
         panel.grid.minor = element_blank(),
@@ -731,16 +1262,40 @@ ggplot(HR_each_cancer, aes(x = HR_each_cancer[['HR_AS0.1']], y = HR_each_cancer[
         axis.text.x = element_text(color="black"),
         axis.text.y = element_text(color="black"),
         axis.ticks = element_line(color = "black")) + 
-  labs(x = "", y = "")+
-  coord_trans(x="log2") +
-  scale_x_continuous(breaks = c(0.1,0.5,1,5), labels=c('0.1',"0.5","1","5"), limits = c(0.1, 5))
-ggsave(paste0(main_fig_dir,paste0("Samstein_Forest_AS0.1_binary.pdf")), width = 3, height = 2.1)
+  labs(x = "Threshold", y = "-log10 (Wald P value)") +
+  scale_x_continuous(breaks = c(0.1, 0.3, 0.5, 0.7, 0.9),
+                     labels = c(0.1, 0.3, 0.5, 0.7, 0.9))
+dev.off()
+
+pdf(paste(main_fig_dir,"HR_VS_threshold_ASep_FGAep.pdf",sep = ""),width=2, height=2.5)
+ggplot(grouped_data, aes(x = threshold, y = HR_mean,color = CNV_calling_cutoff, fill = CNV_calling_cutoff)) + 
+  #geom_point() + 
+  geom_line(size=0.2) +
+  geom_ribbon(aes(ymin = HR_q025, ymax = HR_q975), alpha = 0.5, colour = NA) +
+  #geom_errorbar(aes(x = threshold, ymin = HR_lower, ymax = HR_upper), width = 0.04, data = grouped_data) +
+  #scale_color_discrete(name = "") + 
+  theme_bw()+
+  theme(legend.position="none",
+        panel.border = element_blank(),
+        panel.grid.major = element_blank(),
+        panel.grid.minor = element_blank(),
+        # Change axis line
+        axis.line = element_line(colour = "black"),
+        axis.text.x = element_text(color="black"),
+        axis.text.y = element_text(color="black"),
+        axis.ticks = element_line(color = "black")) + 
+  labs(x = "Threshold", y = "Hazard ratio") + 
+  scale_x_continuous(breaks = c(0.1, 0.3, 0.5, 0.7, 0.9),
+                     labels = c(0.1, 0.3, 0.5, 0.7, 0.9))
+dev.off()
 
 ```
-
-
-# Multivariable hazard ratio comparison between AS0.1 and AS* (Samstein et al. cohort)
+# Figure 4c. Comparison of AS0.1 and AS_EP in predicting survival
 ```{r}
+
+cols <- cols0
+
+####### Multivariable hazard ratio comparison between AS* and AS0.1 (Samstein et al. cohort)
 data_for_HR = samstein_df#[samstein_df$TMB_score=='low',]
 data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
 data_for_HR$AS0.1_score <- relevel(factor(data_for_HR$AS0.1_score), ref = "low")
@@ -782,354 +1337,10 @@ ggpaired(HR_each_cancer %>% rename(`AS0.1` = HR_AS0.1,
          palette = cols, xlab = "Metric", legend.title = "", ylab = "Multivariable hazard ratio") +
   stat_compare_means(paired = T) +
   theme(legend.position = "right") +
-  ylim(0.6, 2.5)
+  ylim(0.6, 2.5) +
+  scale_x_discrete(labels = expression(AS[0.1], AS[EP]))
 ggsave(paste0(main_fig_dir,paste0("Samstein_AS0.1_ASstar_MHR_Comparison.pdf")), width = 4.2, height = 3)
 
 print(paste("MHR (AS0.1 versus ASstar):",mean(HR_each_cancer$HR_AS0.1),mean(HR_each_cancer$HR_ASstar)))
-```
-
-
-# Multivariable hazard ratio comparison between AS* and FGA* (Samstein et al. cohort)
-```{r}
-data_for_HR = samstein_df#[samstein_df$TMB_score=='low',]
-data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
-data_for_HR$ASstar_score <- relevel(factor(data_for_HR$ASstar_score), ref = "low")
-data_for_HR$FGAstar_score <- relevel(factor(data_for_HR$FGAstar_score), ref = "low")
-HR_each_cancer = data.frame()
-
-model1 = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `ASstar_score` + `Drug_class`, data = data_for_HR) 
-model2 = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGAstar_score` + `Drug_class`, data = data_for_HR) 
-HR_ct1 = exp(model1$coefficients[['ASstar_scorehigh']])
-HR_ct1_025 = exp(confint(model1))['ASstar_scorehigh',1]
-HR_ct1_975 = exp(confint(model1))['ASstar_scorehigh',2]
-p_ct1 = summary(model1)$coefficients['ASstar_scorehigh',5]
-HR_ct2 = exp(model2$coefficients[['FGAstar_scorehigh']])
-HR_ct2_025 = exp(confint(model2))['FGAstar_scorehigh',1]
-HR_ct2_975 = exp(confint(model2))['FGAstar_scorehigh',2]
-p_ct2 = summary(model2)$coefficients['FGAstar_scorehigh',5]
-HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct1,HR_ct1_025,HR_ct1_975,p_ct1,HR_ct2,HR_ct2_025,HR_ct2_975,p_ct2,row.names = 'All'))
-
-for (ct in cancerType_samstein){
-  model1 = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `ASstar_score` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
-  HR_ct1 = exp(model1$coefficients[['ASstar_scorehigh']])
-  HR_ct1_025 = exp(confint(model1))['ASstar_scorehigh',1]
-  HR_ct1_975 = exp(confint(model1))['ASstar_scorehigh',2]
-  p_ct1 = summary(model1)$coefficients['ASstar_scorehigh',5]
-  
-  model2 = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGAstar_score` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
-  HR_ct2 = exp(model2$coefficients[['FGAstar_scorehigh']])
-  HR_ct2_025 = exp(confint(model2))['FGAstar_scorehigh',1]
-  HR_ct2_975 = exp(confint(model2))['FGAstar_scorehigh',2]
-  p_ct2 = summary(model2)$coefficients['FGAstar_scorehigh',5]
-  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct1,HR_ct1_025,HR_ct1_975,p_ct1,HR_ct2,HR_ct2_025,HR_ct2_975,p_ct2,row.names = ct))
-}
-colnames(HR_each_cancer) = c('HR_ASstar','HR_ASstar_025','HR_ASstar_975','p_ASstar','HR_FGAstar','HR_FGAstar_025','HR_FGAstar_975','p_FGAstar')
-HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
-ggpaired(HR_each_cancer %>% rename(`AS*` = HR_ASstar,
-                                   `FGA*` = HR_FGAstar), 
-         cond1 = "AS*", cond2 = "FGA*", line.color = "CANCER_TYPE", line.size = 1,
-         fill = "gray65",
-         palette = cols, xlab = "Metric", legend.title = "", ylab = "Multivariable hazard ratio") +
-  stat_compare_means(paired = T) +
-  theme(legend.position = "right") +
-  ylim(0.5, 3)
-ggsave(paste0(main_fig_dir,paste0("Samstein_ASstar_FGAstar_MHR_Comparison.pdf")), width = 4.2, height = 3)
-
-print(paste("MHR (ASstar versus FGAstar):",mean(HR_each_cancer$HR_ASstar),mean(HR_each_cancer$HR_FGAstar), mean(HR_each_cancer$HR_FGAstar) - mean(HR_each_cancer$HR_ASstar)))
-```
-
-# Pan-cancer K-M survival curves of AS0.1high-AS*high VS AS0.1high-AS*low VS AS0.1low-AS*high VS AS0.1low-AS*low
-```{r}
-samstein_df_TMBlow = samstein_df[samstein_df$TMB_score=='low',]
-quantile_plot <- samstein_df_TMBlow %>%
-  group_by(CancerType) %>% 
-      mutate(AS_as_group = paste0(AS0.1_score, " AS0.1, ", ASstar_score, " AS*"))
-
-pdf(paste0(main_fig_dir,"PanCan_AS0.1-ASstar_Thresh.pdf"), width = 6, height = 6, onefile = F)
-ggsurvplot(survfit(Surv(OS_Months, OS_Event) ~ AS_as_group, data = quantile_plot), pval = T, risk.table = T,
-           palette = c("#9B2226","#001219", "#CA6702", "#005F73"),
-           risk.table.height = 0.3,
-           legend.labs = c("AS0.1H/AS*H", "AS0.1H/AS*L", "AS0.1L/AS*H", "AS0.1L/AS*L"),
-          pval.method = T, tables.y.text = F) +
-  guides(color=guide_legend(ncol =4)) +
-  labs(color = "AS") 
-dev.off()
-
-quantile_plot_temp = quantile_plot[quantile_plot$AS_as_group=='high AS0.1, low AS*' | quantile_plot$AS_as_group=='low AS0.1, low AS*', ]
-scox = coxph(Surv(quantile_plot_temp$OS_Months,quantile_plot_temp$OS_Event)~AS_as_group, data=quantile_plot_temp)
-scox_coef = summary(scox)$coefficients
-HR_value = scox_coef[2] # hazard ratio
-Z_value=scox_coef[4]
-P_value=scox_coef[5]
 
 ```
-
-
-# Multivariable hazard ratio Forest plot for AS0.2 (Binary, Samstein cohort)
-```{r}
-
-dataset_NA = 'samstein'
-cancerType_list = cancerType_samstein
-plot_height = 2.1
-
-############################## percentile binarization ##############################
-data_for_HR = samstein_df#[samstein_df$TMB_score=='low',]
-data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
-data_for_HR$AS_score <- relevel(factor(data_for_HR$AS0.2_score), ref = "low")
-HR_pancancer = data.frame()
-model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR) 
-HR_ct = exp(model$coefficients[['AS_scorehigh']])
-HR_ct_025 = exp(confint(model))['AS_scorehigh',1]
-HR_ct_975 = exp(confint(model))['AS_scorehigh',2]
-p_ct = summary(model)$coefficients['AS_scorehigh',5]
-HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-HR_pancancer = rbind(HR_pancancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = 'All'))
-colnames(HR_pancancer) = c('HR_AS','HR_AS025','HR_AS975','p-val_AS','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_pancancer['CANCER_TYPE'] = rownames(HR_pancancer)
-HR_each_cancer = data.frame()
-for (ct in cancerType_list){
-  model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
-  HR_ct = exp(model$coefficients[['AS_scorehigh']])
-  HR_ct_025 = exp(confint(model))['AS_scorehigh',1]
-  HR_ct_975 = exp(confint(model))['AS_scorehigh',2]
-  p_ct = summary(model)$coefficients['AS_scorehigh',5]
-  HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-  HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-  HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-  p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = ct))
-}
-colnames(HR_each_cancer) = c('HR_AS','HR_AS025','HR_AS975','p-val_AS','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
-HR_each_cancer = HR_each_cancer %>% arrange(HR_AS)
-HR_each_cancer = rbind(HR_pancancer,HR_each_cancer)
-cancerOrder = HR_each_cancer$CANCER_TYPE
-
-HR_each_cancer$CANCER_TYPE <- factor(HR_each_cancer$CANCER_TYPE, levels = cancerOrder)
-ggplot(HR_each_cancer, aes(x = HR_each_cancer[['HR_AS']], y = HR_each_cancer[['CANCER_TYPE']])) + # rep(9:1)
-  geom_point(size = 2) +
-  geom_errorbar(aes(xmin = HR_each_cancer[['HR_AS025']], xmax = HR_each_cancer[['HR_AS975']]))+
-  theme(legend.position = "none") +
-  geom_vline(xintercept=1,linetype=3)+
-  theme_bw()+
-  theme(#axis.text.x=element_blank(),
-        #axis.ticks.x=element_blank(),
-        #axis.text.y=element_blank(),
-        #axis.ticks.y=element_blank(),
-        # Hide panel borders and remove grid lines
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "", y = "")+
-  coord_trans(x="log2") +
-  scale_x_continuous(breaks = c(0.1,0.5,1,5), labels=c('0.1',"0.5","1","5"), limits = c(0.1, 5))
-ggsave(paste0(main_fig_dir,paste0(dataset_NA,"_Forest_AS0.2_binary.pdf")), width = 3, height = plot_height)
-
-
-
-############################## absolute binarization ##############################
-data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_10), ref = "low")
-data_for_HR$AS_score <- relevel(factor(data_for_HR$AS0.2_0.1), ref = "low")
-HR_each_cancer = data.frame()
-model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR) 
-HR_ct = exp(model$coefficients[['AS_scorehigh']])
-HR_ct_025 = exp(confint(model))['AS_scorehigh',1]
-HR_ct_975 = exp(confint(model))['AS_scorehigh',2]
-p_ct = summary(model)$coefficients['AS_scorehigh',5]
-HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = 'All'))
-for (ct in cancerType_list){
-  model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `AS_score` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
-  HR_ct = exp(model$coefficients[['AS_scorehigh']])
-  HR_ct_025 = exp(confint(model))['AS_scorehigh',1]
-  HR_ct_975 = exp(confint(model))['AS_scorehigh',2]
-  p_ct = summary(model)$coefficients['AS_scorehigh',5]
-  HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-  HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-  HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-  p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = ct))
-}
-colnames(HR_each_cancer) = c('HR_AS','HR_AS025','HR_AS975','p-val_AS','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
-
-HR_each_cancer$CANCER_TYPE <- factor(HR_each_cancer$CANCER_TYPE, levels = cancerOrder)
-ggplot(HR_each_cancer, aes(x = HR_each_cancer[['HR_AS']], y = HR_each_cancer[['CANCER_TYPE']])) + # rep(9:1)
-  geom_point(size = 2) +
-  geom_errorbar(aes(xmin = HR_each_cancer[['HR_AS025']], xmax = HR_each_cancer[['HR_AS975']]))+
-  theme(legend.position = "none") +
-  geom_vline(xintercept=1,linetype=3)+
-  theme_bw()+
-  theme(#axis.text.x=element_blank(),
-        #axis.ticks.x=element_blank(),
-        #axis.text.y=element_blank(),
-        #axis.ticks.y=element_blank(),
-        # Hide panel borders and remove grid lines
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "", y = "")+
-  coord_trans(x="log2") +
-  scale_x_continuous(breaks = c(0.1,0.5,1,5), labels=c('0.1',"0.5","1","5"), limits = c(0.1, 5))
-ggsave(paste0(main_fig_dir,paste0(dataset_NA,"_Forest_AS0.2_binary_abs.pdf")), width = 3, height = plot_height)
-
-```
-
-
-# Multivariable hazard ratio Forest plot for FGA0.2 (Binary)
-```{r}
-
-# dataset_NA = 'mskcc'
-# cancerType_list = cancerType_mskcc
-# plot_height = 2.9
-
-# dataset_NA = 'chowell'
-# cancerType_list = cancerType_chowell
-# plot_height = 2.6
-
-dataset_NA = 'samstein'
-cancerType_list = cancerType_samstein
-plot_height = 2.1
-
-############################## percentile binarization ##############################
-if (dataset_NA == 'chowell'){
-  data_for_HR = chowell_df
-}else if (dataset_NA == 'samstein'){
-  data_for_HR = samstein_df#[samstein_df$TMB_score=='low',]
-}else if (dataset_NA == 'mskcc'){
-  data_for_HR = mskcc_df#[samstein_df$TMB_score=='low',]
-}
-data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_score), ref = "low")
-data_for_HR$FGA_score <- relevel(factor(data_for_HR$FGA0.2_score), ref = "low")
-HR_pancancer = data.frame()
-model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR) 
-HR_ct = exp(model$coefficients[['FGA_scorehigh']])
-HR_ct_025 = exp(confint(model))['FGA_scorehigh',1]
-HR_ct_975 = exp(confint(model))['FGA_scorehigh',2]
-p_ct = summary(model)$coefficients['FGA_scorehigh',5]
-HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-HR_pancancer = rbind(HR_pancancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = 'All'))
-colnames(HR_pancancer) = c('HR_FGA','HR_FGA025','HR_FGA975','p-val_FGA','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_pancancer['CANCER_TYPE'] = rownames(HR_pancancer)
-HR_each_cancer = data.frame()
-for (ct in cancerType_list){
-  model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
-  HR_ct = exp(model$coefficients[['FGA_scorehigh']])
-  HR_ct_025 = exp(confint(model))['FGA_scorehigh',1]
-  HR_ct_975 = exp(confint(model))['FGA_scorehigh',2]
-  p_ct = summary(model)$coefficients['FGA_scorehigh',5]
-  HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-  HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-  HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-  p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = ct))
-}
-colnames(HR_each_cancer) = c('HR_FGA','HR_FGA025','HR_FGA975','p-val_FGA','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
-#HR_each_cancer = HR_each_cancer %>% arrange(HR_FGA)
-HR_each_cancer = rbind(HR_pancancer,HR_each_cancer)
-#cancerOrder = HR_each_cancer$CANCER_TYPE
-
-HR_each_cancer$CANCER_TYPE <- factor(HR_each_cancer$CANCER_TYPE, levels = cancerOrder)
-ggplot(HR_each_cancer, aes(x = HR_each_cancer[['HR_FGA']], y = HR_each_cancer[['CANCER_TYPE']])) + # rep(9:1)
-  geom_point(size = 2) +
-  geom_errorbar(aes(xmin = HR_each_cancer[['HR_FGA025']], xmax = HR_each_cancer[['HR_FGA975']]))+
-  theme(legend.position = "none") +
-  geom_vline(xintercept=1,linetype=3)+
-  theme_bw()+
-  theme(#axis.text.x=element_blank(),
-        #axis.ticks.x=element_blank(),
-        #axis.text.y=element_blank(),
-        #axis.ticks.y=element_blank(),
-        # Hide panel borders and remove grid lines
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "", y = "")+
-  coord_trans(x="log2") +
-  scale_x_continuous(breaks = c(0.1,0.5,1,5), labels=c('0.1',"0.5","1","5"), limits = c(0.1, 5))
-ggsave(paste0(main_fig_dir,paste0(dataset_NA,"_Forest_FGA0.2_binary.pdf")), width = 3, height = plot_height)
-
-
-
-
-############################## absolute binarization ##############################
-data_for_HR$TMB_score <- relevel(factor(data_for_HR$TMB_10), ref = "low")
-data_for_HR$FGA_score <- relevel(factor(data_for_HR$FGA0.2_0.16), ref = "low")
-HR_each_cancer = data.frame()
-model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR) 
-HR_ct = exp(model$coefficients[['FGA_scorehigh']])
-HR_ct_025 = exp(confint(model))['FGA_scorehigh',1]
-HR_ct_975 = exp(confint(model))['FGA_scorehigh',2]
-p_ct = summary(model)$coefficients['FGA_scorehigh',5]
-HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = 'All'))
-for (ct in cancerType_list){
-  model = coxph(Surv(OS_Months, OS_Event) ~ `TMB_score` + `FGA_score` + `Drug_class`, data = data_for_HR[data_for_HR$CancerType==ct,]) 
-  HR_ct = exp(model$coefficients[['FGA_scorehigh']])
-  HR_ct_025 = exp(confint(model))['FGA_scorehigh',1]
-  HR_ct_975 = exp(confint(model))['FGA_scorehigh',2]
-  p_ct = summary(model)$coefficients['FGA_scorehigh',5]
-  HR_TMB_ct = exp(model$coefficients[['TMB_scorehigh']])
-  HR_TMB_ct_025 = exp(confint(model))['TMB_scorehigh',1]
-  HR_TMB_ct_975 = exp(confint(model))['TMB_scorehigh',2]
-  p_TMB_ct = summary(model)$coefficients['TMB_scorehigh',5]
-  HR_each_cancer = rbind(HR_each_cancer,data.frame(HR_ct,HR_ct_025,HR_ct_975,p_ct,HR_TMB_ct,HR_TMB_ct_025,HR_TMB_ct_975,p_TMB_ct,row.names = ct))
-}
-colnames(HR_each_cancer) = c('HR_FGA','HR_FGA025','HR_FGA975','p-val_FGA','HR_TMB','HR_TMB025','HR_TMB975','p-val_TMB')
-HR_each_cancer['CANCER_TYPE'] = rownames(HR_each_cancer)
-
-HR_each_cancer$CANCER_TYPE <- factor(HR_each_cancer$CANCER_TYPE, levels = cancerOrder)
-ggplot(HR_each_cancer, aes(x = HR_each_cancer[['HR_FGA']], y = HR_each_cancer[['CANCER_TYPE']])) + # rep(9:1)
-  geom_point(size = 2) +
-  geom_errorbar(aes(xmin = HR_each_cancer[['HR_FGA025']], xmax = HR_each_cancer[['HR_FGA975']]))+
-  theme(legend.position = "none") +
-  geom_vline(xintercept=1,linetype=3)+
-  theme_bw()+
-  theme(#axis.text.x=element_blank(),
-        #axis.ticks.x=element_blank(),
-        #axis.text.y=element_blank(),
-        #axis.ticks.y=element_blank(),
-        # Hide panel borders and remove grid lines
-        panel.border = element_blank(),
-        panel.grid.major = element_blank(),
-        panel.grid.minor = element_blank(),
-        # Change axis line
-        axis.line = element_line(colour = "black"),
-        axis.text.x = element_text(color="black"),
-        axis.text.y = element_text(color="black"),
-        axis.ticks = element_line(color = "black")) + 
-  labs(x = "", y = "")+
-  coord_trans(x="log2") +
-  scale_x_continuous(breaks = c(0.1,0.5,1,5), labels=c('0.1',"0.5","1","5"), limits = c(0.1, 5))
-ggsave(paste0(main_fig_dir,paste0(dataset_NA,"_Forest_FGA0.2_binary_abs.pdf")), width = 3, height = plot_height)
-
-```
-
